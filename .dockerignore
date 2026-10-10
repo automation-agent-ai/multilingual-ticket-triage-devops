@@ -1,0 +1,85 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# .dockerignore — files excluded from the Docker build context
+#
+# Keep the build context small: exclude anything that is not part of the
+# Python source code or configuration needed to run the API.
+# ──────────────────────────────────────────────────────────────────────────────
+
+# Python virtual environment (multi-GB; dependencies are installed in the image)
+.venv/
+venv/
+env/
+
+# Git history and metadata
+.git/
+.gitignore
+.gitattributes
+
+# Local data artifacts — provided as volumes at runtime, never bundled
+data/
+outputs/
+
+# Python byte-code caches
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+
+# Test suite (not needed in production image)
+tests/
+
+# Development scripts and notebooks
+scripts/
+*.ipynb
+
+# Documentation
+docs/
+*.md
+!api/README.md
+
+# IDE and editor metadata
+.vscode/
+.idea/
+*.code-workspace
+*.sublime-*
+.editorconfig
+.DS_Store
+Thumbs.db
+
+# Environment files (secrets should never enter the build context)
+.env
+.env.*
+*.env
+
+# Secrets and credentials
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+kaggle.json
+secrets/
+
+# Logs
+*.log
+logs/
+
+# Operating system files
+.DS_Store
+ehthumbs.db
+
+# Kaggle downloads and dataset CSVs
+*.csv
+
+# Docker-related (avoid recursive includes)
+Dockerfile*
+docker-compose*.yml
+.dockerignore
+
+# Optional EDA requirements (not needed in API image)
+requirements_eda_optional.txt
+
+# Ontology files (loaded via config.yaml path; mount if needed)
+ontology/

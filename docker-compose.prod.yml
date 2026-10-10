@@ -1,0 +1,118 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# docker-compose.prod.yml — PROD environment
+#
+# Start:   docker compose -f docker-compose.prod.yml up -d
+# Stop:    docker compose -f docker-compose.prod.yml down
+#
+# Features:
+#  - Uses the pre-built image (ticket-triage-api:latest).
+#    Build first: docker build -t ticket-triage-api:latest .
+#  - No source-code mounts — application code is baked into the image.
+#  - Non-root execution enforced via the image USER directive.
+#  - Environment-driven configuration (no secrets in this file).
+#  - Restart policy: unless-stopped.
+#  - Tighter resource limits.
+#  - Host port defaults to 8001 to avoid conflicts with DEV on port 8000.
+#    Override with PROD_PORT env var.
+#  - Stepping stone toward Kubernetes: named volumes for data and model cache
+#    map cleanly to PersistentVolumeClaims.
+# ──────────────────────────────────────────────────────────────────────────────
+
+services:
+  api:
+    # Use the pre-built production image.  Tag overrideable at CI time.
+    image: ticket-triage-api:${IMAGE_TAG:-latest}
+    container_name: ticket-triage-prod
+
+    # ── Security: enforce non-root ───────────────────────────────────────────
+    user: "1000:1000"
+    read_only: false           # lancedb and outputs need writes via volumes
+    security_opt:
+      - no-new-privileges:true
+
+    # ── Ports ────────────────────────────────────────────────────────────────
+    # PROD runs on host port 8001 by default so DEV and PROD can coexist.
+    # Override with: PROD_PORT=9000 docker compose -f docker-compose.prod.yml up -d
+    ports:
+      - "${PROD_PORT:-8001}:8000"
+
+    # ── Environment ──────────────────────────────────────────────────────────
+    # Sensitive values (API keys, etc.) should be supplied via .env file or
+    # Docker secrets — never hardcoded here.
+    environment:
+      OLLAMA_BASE_URL: "${OLLAMA_BASE_URL:-http://host.docker.internal:11434}"
+      CONFIG_PATH: "/app/config.yaml"
+      INFERENCE_CONCURRENCY: "${INFERENCE_CONCURRENCY:-1}"
+      HOST: "0.0.0.0"
+      PORT: "8000"
+      RELOAD: "false"
+      HF_HOME: "/home/appuser/.cache/huggingface"
+      TRANSFORMERS_CACHE: "/home/appuser/.cache/huggingface/hub"
+      TOKENIZERS_PARALLELISM: "false"
+      PYTHONUNBUFFERED: "1"
+
+    # ── Volume mounts ─────────────────────────────────────────────────────────
+    # Source code is NOT mounted — it is baked into the image.
+    volumes:
+      # Existing DuckDB + LanceDB artifacts — read-only in PROD.
+      # The host paths must contain the pre-built indexes.
+      - type: bind
+        source: ./data
+        target: /app/data
+        read_only: true
+
+      # Writable outputs volume (triage CSVs, trace JSONL, run summaries).
+      - type: volume
+        source: prod-outputs
+        target: /app/outputs
+
+      # HuggingFace embedding model cache — bind-mount from host.
+      # The model must already exist at this path on the host before first start.
+      # Override with: HF_CACHE_DIR=/path/to/cache docker compose -f docker-compose.prod.yml up -d
+      - type: bind
+        source: ${HF_CACHE_DIR:-~/.cache/huggingface}
+        target: /home/appuser/.cache/huggingface
+        read_only: false   # HF hub writes lock files into the cache
+
+    # ── Resource limits ───────────────────────────────────────────────────────
+    deploy:
+      resources:
+        limits:
+          memory: 5g
+          cpus: "2.0"
+        reservations:
+          memory: 2g
+          cpus: "0.5"
+
+    # ── Health check ──────────────────────────────────────────────────────────
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 120s
+      retries: 3
+
+    # ── Restart policy ────────────────────────────────────────────────────────
+    restart: unless-stopped
+
+    # ── Logging ───────────────────────────────────────────────────────────────
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "100m"
+        max-file: "5"
+
+    # ── Network ───────────────────────────────────────────────────────────────
+    networks:
+      - triage-prod-net
+
+# ── Named volumes ─────────────────────────────────────────────────────────────
+volumes:
+  prod-outputs:
+    # Persists triage result files across container restarts.
+    driver: local
+
+# ── Networks ──────────────────────────────────────────────────────────────────
+networks:
+  triage-prod-net:
+    driver: bridge

@@ -1,0 +1,106 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# docker-compose.dev.yml — DEV environment
+#
+# Start:   docker compose -f docker-compose.dev.yml up
+# Stop:    docker compose -f docker-compose.dev.yml down
+#
+# Features:
+#  - Builds the image locally from the Dockerfile on every `up --build`.
+#  - Mounts the source code so code changes are reflected without rebuilding.
+#  - Connects to Ollama running on the Windows host via host.docker.internal.
+#  - Mounts the existing data/ directory (read-only) and outputs/ (writable).
+#  - Mounts the host HuggingFace model cache so the embedding model is not
+#    downloaded on every container start.
+#  - Enables uvicorn auto-reload for fast iteration.
+#  - Host port defaults to 8000 (override with API_PORT env var).
+# ──────────────────────────────────────────────────────────────────────────────
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime          # build both stages; run the runtime stage
+    image: ticket-triage-api:dev
+    container_name: ticket-triage-dev
+
+    # ── Ports ───────────────────────────────────────────────────────────────
+    # Set API_PORT in your shell to use a different host port.
+    ports:
+      - "${API_PORT:-8000}:8000"
+
+    # ── Environment ─────────────────────────────────────────────────────────
+    environment:
+      # Ollama runs on the Windows host; Docker Desktop exposes it here.
+      OLLAMA_BASE_URL: "http://host.docker.internal:11434"
+      CONFIG_PATH: "/app/config.yaml"
+      INFERENCE_CONCURRENCY: "1"
+      HOST: "0.0.0.0"
+      PORT: "8000"
+      # Enable uvicorn hot-reload for development convenience.
+      RELOAD: "true"
+      # HuggingFace cache inside the container home directory.
+      HF_HOME: "/home/appuser/.cache/huggingface"
+      TRANSFORMERS_CACHE: "/home/appuser/.cache/huggingface/hub"
+      # Disable tokenizer parallelism warning in container.
+      TOKENIZERS_PARALLELISM: "false"
+
+    # ── Volume mounts ────────────────────────────────────────────────────────
+    volumes:
+      # Live source code mounts — reflect changes without image rebuild.
+      - ./src:/app/src:ro
+      - ./api:/app/api:ro
+      - ./config.yaml:/app/config.yaml:ro
+
+      # Existing data artifacts — read-only to prevent accidental writes.
+      # DuckDB and LanceDB must already exist (do NOT rebuild via main.py).
+      - ./data:/app/data:ro
+
+      # Writable outputs directory for triage result files.
+      - ./outputs:/app/outputs
+
+      # HuggingFace model cache from host — avoids re-downloading ~2 GB.
+      # Bind-mount from the host user's cache directory.  The container runs
+      # as UID 1000 which matches the host's primary user on WSL2.
+      - ${HF_CACHE_DIR:-~/.cache/huggingface}:/home/appuser/.cache/huggingface:rw
+
+    # ── Resource limits (relaxed for development) ────────────────────────────
+    deploy:
+      resources:
+        limits:
+          memory: 6g
+        reservations:
+          memory: 2g
+
+    # ── Health check ─────────────────────────────────────────────────────────
+    # /health is always 200; /ready checks agent initialization.
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 5s
+      start_period: 120s   # allow time for embedding model to load
+      retries: 5
+
+    # ── Restart policy ───────────────────────────────────────────────────────
+    # In DEV, do not restart automatically so crash details are visible.
+    restart: "no"
+
+    # ── Logging ─────────────────────────────────────────────────────────────
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
+
+    # ── Network ──────────────────────────────────────────────────────────────
+    networks:
+      - triage-dev-net
+
+# ── Named volumes ─────────────────────────────────────────────────────────────
+# DEV uses a bind mount for HF cache (see volumes section in the service),
+# so no named volumes are required here.
+
+# ── Networks ──────────────────────────────────────────────────────────────────
+networks:
+  triage-dev-net:
+    driver: bridge

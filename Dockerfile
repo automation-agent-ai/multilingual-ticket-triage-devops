@@ -1,0 +1,109 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# Multilingual Ticket Triage API — Production Dockerfile
+#
+# Build:   docker build -t ticket-triage-api:latest .
+# Run:     docker run -p 8000:8000 -e OLLAMA_BASE_URL=http://host.docker.internal:11434 \
+#                     -v $(pwd)/data:/app/data:ro \
+#                     -v hf-model-cache:/home/appuser/.cache/huggingface \
+#                     ticket-triage-api:latest
+#
+# Notes:
+#  - torch is installed from the PyTorch CPU wheel index (no CUDA) to keep the
+#    image lean (~3 GB vs ~8 GB).  The embedding model runs on CPU in the
+#    container.
+#  - Data (DuckDB, LanceDB) and the HuggingFace model cache are always
+#    provided via volumes at runtime.  The image itself contains no datasets,
+#    databases, model weights, or secrets.
+#  - The application runs as non-root user "appuser" (UID 1000).
+# ──────────────────────────────────────────────────────────────────────────────
+
+# ── Stage 1: dependency builder ───────────────────────────────────────────────
+# A separate build stage keeps the final image free of build tools and
+# pip caches.
+FROM python:3.12-slim AS builder
+
+# System build dependencies needed by some C extensions.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+        curl \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+
+# ── Layer 1: PyTorch CPU wheel (large; cached separately for faster rebuilds) ─
+# Pin to a stable CPU-only release.  Isolate this layer so a requirements
+# update does not re-download ~750 MB of PyTorch wheels.
+COPY requirements-docker.txt .
+RUN pip install --no-cache-dir --upgrade pip \
+ && pip install --no-cache-dir \
+        "torch==2.3.1+cpu" \
+        --index-url https://download.pytorch.org/whl/cpu
+
+# ── Layer 2: remaining Python dependencies ────────────────────────────────────
+# requirements-docker.txt does NOT include torch (handled above).
+RUN pip install --no-cache-dir -r requirements-docker.txt
+
+# ── Stage 2: runtime image ────────────────────────────────────────────────────
+FROM python:3.12-slim AS runtime
+
+# Minimal system runtime dependencies.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libgomp1 \
+        curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Non-root user for production security.
+# UID/GID 1000 matches the typical first user on Linux/WSL2 hosts, which
+# simplifies bind-mount permissions for the HuggingFace model cache.
+RUN groupadd --gid 1000 appgroup \
+ && useradd  --uid 1000 --gid appgroup --shell /bin/bash --create-home appuser
+
+WORKDIR /app
+
+# Copy the entire site-packages tree from the builder stage.
+COPY --from=builder /usr/local/lib/python3.12/site-packages \
+                    /usr/local/lib/python3.12/site-packages
+COPY --from=builder /usr/local/bin /usr/local/bin
+
+# ── Application code ──────────────────────────────────────────────────────────
+# Only the source packages required to run the API.
+# Datasets, databases, model weights, secrets are never bundled.
+COPY --chown=appuser:appgroup api/        ./api/
+COPY --chown=appuser:appgroup src/        ./src/
+COPY --chown=appuser:appgroup config.yaml ./config.yaml
+
+# ── Runtime directories ───────────────────────────────────────────────────────
+# data/    — DuckDB and LanceDB mount point (provided as volume at runtime).
+# outputs/ — Writable directory for result files.
+# HuggingFace cache inside appuser home so the non-root user can write to it.
+RUN mkdir -p /app/data /app/outputs \
+ && chown -R appuser:appgroup /app
+
+# ── Environment defaults ──────────────────────────────────────────────────────
+# All of these are overridden at runtime via environment variables or compose
+# files.  OLLAMA_BASE_URL is intentionally left at the container default;
+# the compose files set host.docker.internal.
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    CONFIG_PATH=/app/config.yaml \
+    OLLAMA_BASE_URL=http://localhost:11434 \
+    INFERENCE_CONCURRENCY=1 \
+    HOST=0.0.0.0 \
+    PORT=8000 \
+    HF_HOME=/home/appuser/.cache/huggingface \
+    TRANSFORMERS_CACHE=/home/appuser/.cache/huggingface/hub
+
+# ── Port ──────────────────────────────────────────────────────────────────────
+EXPOSE 8000
+
+# ── Switch to non-root ────────────────────────────────────────────────────────
+USER appuser
+
+# ── Health check ──────────────────────────────────────────────────────────────
+# Short interval during development; PROD compose overrides these values.
+HEALTHCHECK --interval=30s --timeout=10s --start-period=90s --retries=3 \
+    CMD curl -f http://localhost:${PORT}/health || exit 1
+
+# ── Startup command ───────────────────────────────────────────────────────────
+# Invokes api/server.py which calls uvicorn with HOST/PORT from environment.
+CMD ["python", "-m", "api.server"]

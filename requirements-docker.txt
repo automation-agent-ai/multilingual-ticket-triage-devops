@@ -1,0 +1,71 @@
+# Docker runtime requirements — CPU build.
+#
+# torch is installed separately in the Dockerfile from the PyTorch CPU wheel
+# index (download.pytorch.org/whl/cpu) to keep the image lean.  Do NOT add
+# torch here; it would pull the full CUDA build from PyPI instead.
+#
+# Versions are pinned for reproducibility.  Update by running:
+#   pip freeze > requirements-docker.txt  (then remove torch + CUDA lines)
+
+# ── NLP / embeddings ──────────────────────────────────────────────────────────
+sentence-transformers==4.1.0
+transformers==4.57.6
+tokenizers==0.22.2
+safetensors==0.8.0
+huggingface_hub==0.36.2
+tqdm==4.68.4
+
+# ── Core data and ML ──────────────────────────────────────────────────────────
+numpy==1.26.4
+pandas==2.3.3
+scikit-learn==1.9.0
+scipy==1.17.1
+joblib==1.5.3
+
+# ── Storage ───────────────────────────────────────────────────────────────────
+# Versions must match those used to write the existing DuckDB and LanceDB files.
+duckdb==1.5.6
+lancedb==0.40.0
+lance-namespace==0.13.0
+lance-namespace-urllib3-client==0.13.0
+pyarrow==20.0.0
+
+# ── FastAPI / HTTP server ─────────────────────────────────────────────────────
+fastapi==0.143.0
+uvicorn[standard]==0.54.0
+anyio==4.15.1
+pydantic==2.13.4
+pydantic-core==2.46.4
+starlette==1.7.0
+h11==0.16.0
+httptools==0.9.0
+uvloop==0.23.0
+websockets==17.2
+watchfiles==1.3.0
+opentelemetry-api==1.45.1
+
+# ── Config / utilities ────────────────────────────────────────────────────────
+PyYAML==6.0.3
+python-dotenv==1.2.2
+requests==2.34.2
+urllib3==2.7.0
+charset-normalizer==3.4.9
+certifi==2026.6.17
+idna==3.18
+
+# ── Transitive / runtime ──────────────────────────────────────────────────────
+annotated-types==0.8.0
+typing-inspection==0.4.2
+typing_extensions==4.16.0
+click==8.5.0
+filelock==3.29.7
+fsspec==2026.6.0
+packaging==26.0
+regex==2026.6.28
+sympy==1.14.0
+mpmath==1.3.0
+networkx==3.6.1
+pillow==12.3.0
+Jinja2==3.1.6
+MarkupSafe==3.0.3
+six==1.17.0
