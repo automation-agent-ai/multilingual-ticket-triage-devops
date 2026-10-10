@@ -1,0 +1,51 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# ──────────────────────────────────────────────────────────────────────────────
+# CI overlay — DEV (registry image variant)
+#
+# PURPOSE:
+#   Used exclusively by GitHub Actions (deploy-dev.yml).
+#   Extends the dev overlay with two CI-specific changes:
+#     1. Image name points to GHCR (newName).
+#        The deploy workflow overrides newTag at runtime via:
+#          kustomize edit set image ticket-triage-api=ghcr.io/...:<sha-tag>
+#     2. imagePullPolicy changed from Never (local kind) to IfNotPresent
+#        so Kubernetes pulls the image from the registry.
+#
+# LOCAL DEVELOPMENT:
+#   Use k8s/overlays/dev directly (imagePullPolicy: Never + local image).
+#   This file is NOT intended for local development.
+# ──────────────────────────────────────────────────────────────────────────────
+
+namespace: triage-dev
+
+# Compose on top of the existing dev overlay.
+resources:
+  - ../../overlays/dev
+
+# Override image name to the GHCR registry path.
+# The deploy workflow sets newTag to the immutable SHA tag before applying.
+images:
+  - name: ticket-triage-api
+    newName: ghcr.io/automation-agent-ai/multilingual-ticket-triage-devops
+    newTag: latest   # placeholder — overridden by the deploy workflow
+
+# Change imagePullPolicy so Kubernetes fetches from the registry.
+# Base deployment sets Never (for pre-staged kind images); CI needs the pull.
+patches:
+  - patch: |
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: ticket-triage
+        namespace: triage-dev
+      spec:
+        template:
+          spec:
+            containers:
+              - name: api
+                imagePullPolicy: IfNotPresent
+    target:
+      kind: Deployment
+      name: ticket-triage

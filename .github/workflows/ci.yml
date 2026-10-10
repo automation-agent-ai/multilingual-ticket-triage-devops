@@ -1,0 +1,224 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# CI — Test · Build · Scan · Publish
+#
+# Triggered on:
+#   push  → main   : full pipeline (test + build + scan + push to GHCR)
+#   pull_request    : test + build + scan (no push; limited permissions on PRs)
+#
+# Security model:
+#   • Default permissions are read-only; jobs explicitly grant extra scope.
+#   • Privileged steps (packages: write, push to GHCR) only run on push to
+#     main — never on pull requests from forks.
+#   • Trivy exits non-zero on CRITICAL/HIGH findings; the push step is
+#     conditioned on the scan passing (initial DevSecOps gate).
+#
+# Image naming:
+#   ghcr.io/automation-agent-ai/multilingual-ticket-triage-devops
+#     :sha-<40-char-git-sha>   ← immutable; used for Kubernetes deployment
+#     :latest                  ← mutable convenience tag (main branch only)
+# ──────────────────────────────────────────────────────────────────────────────
+
+name: CI — Test · Build · Scan · Publish
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Minimum default permissions; individual jobs add what they need.
+permissions:
+  contents: read
+
+# ── Repository-wide environment ────────────────────────────────────────────────
+env:
+  REGISTRY: ghcr.io
+  # Use the organisation slug so the workflow is not sensitive to a repo rename.
+  IMAGE_NAME: automation-agent-ai/multilingual-ticket-triage-devops
+
+jobs:
+  # ────────────────────────────────────────────────────────────────────────────
+  # Job 1 — Python unit tests
+  #
+  # Installs CPU-only PyTorch first (separate layer for pip caching efficiency),
+  # then the remaining project dependencies from requirements-docker.txt.
+  # Runs all tests except those marked @pytest.mark.slow (model-download tests).
+  #
+  # No Docker access, no network calls to Ollama or any inference backend.
+  # All 741 non-slow tests use deterministic fakes.
+  # ────────────────────────────────────────────────────────────────────────────
+  test:
+    name: Python Tests
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          # Built-in pip cache keyed on requirements hash.
+          cache: pip
+
+      # Install CPU torch before the rest of requirements-docker.txt.
+      # This ensures downstream packages (sentence-transformers, transformers)
+      # resolve against the CPU wheel index rather than pulling CUDA builds
+      # from PyPI, keeping the install ~750 MB smaller.
+      - name: Install CPU-only PyTorch
+        run: |
+          pip install --upgrade pip
+          pip install "torch==2.3.1+cpu" \
+            --index-url https://download.pytorch.org/whl/cpu
+
+      - name: Install project runtime dependencies
+        run: pip install -r requirements-docker.txt
+
+      # pytest and httpx (needed by FastAPI TestClient) are not in
+      # requirements-docker.txt because they are test-only dependencies.
+      - name: Install test-only extras
+        run: pip install "pytest==8.3.5" "httpx==0.28.1"
+
+      - name: Run tests (excluding slow model-download tests)
+        run: pytest tests/ -m "not slow" -v --tb=short
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # Job 2 — Docker build · Trivy scan · GHCR publish
+  #
+  # Strategy (two-pass build with shared GHA layer cache):
+  #   Pass 1 — build with `load: true`  → image available in local Docker
+  #             daemon for Trivy to scan; cache exported to GitHub Actions.
+  #   Pass 2 — build with `push: true`  → reuses GHA cache (fast, no re-build);
+  #             pushes to GHCR.  Skipped on PRs and if Trivy found issues.
+  #
+  # Permissions:
+  #   packages: write   — push to GHCR (main branch push events only)
+  #   security-events: write — upload Trivy SARIF to GitHub Security tab
+  # ────────────────────────────────────────────────────────────────────────────
+  build-scan-push:
+    name: Build · Scan · Push
+    runs-on: ubuntu-latest
+    needs: test
+    permissions:
+      contents: read
+      packages: write          # push to GHCR
+      security-events: write   # upload Trivy SARIF
+
+    outputs:
+      # Expose the image digest for downstream deploy workflows.
+      image-digest: ${{ steps.push.outputs.digest }}
+      image-tag: sha-${{ github.sha }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx (docker-container driver)
+        uses: docker/setup-buildx-action@v3
+
+      # Computes two tags:
+      #   sha-<40-char-sha>  — immutable; references the exact commit
+      #   latest             — updated on main-branch pushes only
+      - name: Compute image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=sha,prefix=sha-,format=long
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+          labels: |
+            org.opencontainers.image.title=Multilingual Ticket Triage API
+            org.opencontainers.image.description=FastAPI triage service (S05)
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+
+      # Log in only for push-to-main events; PRs never write to the registry.
+      - name: Log in to GHCR
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # ── Pass 1: build + load into local Docker daemon for scanning ──────────
+      # cache-to exports layers to GHA cache (used by pass 2 for fast push).
+      # The image is tagged with a simple local name for Trivy.
+      - name: Build image (local — for Trivy scan)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: ticket-triage-api:ci-scan
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # ── Trivy vulnerability scan ─────────────────────────────────────────────
+      # Scans the locally loaded image.
+      # exit-code: 1  → fail the pipeline on CRITICAL or HIGH findings
+      # ignore-unfixed → skip CVEs where no patched version is available yet
+      #                  (avoids false-positive failures on unresolvable OS CVEs)
+      # Output is SARIF for upload to the GitHub Security tab.
+      - name: Trivy — vulnerability scan
+        id: trivy
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ticket-triage-api:ci-scan
+          format: sarif
+          output: trivy-results.sarif
+          severity: CRITICAL,HIGH
+          exit-code: "1"
+          ignore-unfixed: true
+
+      # Upload results to GitHub Security > Code scanning (always, even on fail).
+      - name: Upload Trivy SARIF to GitHub Security
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-results.sarif
+          category: trivy-image-scan
+
+      # ── Pass 2: push to GHCR ──────────────────────────────────────────────
+      # Conditions:
+      #   1. Push event (not a PR — PRs never publish images)
+      #   2. Target branch is main
+      #   3. Trivy scan passed (no CRITICAL/HIGH)
+      # Reuses layers from GHA cache so this pass is near-instant.
+      - name: Push image to GHCR
+        id: push
+        if: >-
+          github.event_name == 'push'
+          && github.ref == 'refs/heads/main'
+          && steps.trivy.outcome == 'success'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+
+      # Emit a job summary with the image coordinates for traceability.
+      - name: Write job summary
+        if: steps.push.outcome == 'success'
+        run: |
+          {
+            echo "### ✅ Image published to GHCR"
+            echo ""
+            echo "| Field | Value |"
+            echo "|---|---|"
+            echo "| Registry | \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}\` |"
+            echo "| Immutable tag | \`sha-${{ github.sha }}\` |"
+            echo "| Digest | \`${{ steps.push.outputs.digest }}\` |"
+            echo "| Pushed by | \`${{ github.actor }}\` |"
+            echo ""
+            echo "Pull command:"
+            echo "\`\`\`bash"
+            echo "docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${{ github.sha }}"
+            echo "\`\`\`"
+          } >> "$GITHUB_STEP_SUMMARY"
