@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: triage-prod
+  labels:
+    environment: prod
+    project: multilingual-ticket-triage
+    managed-by: kustomize

@@ -1,0 +1,14 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Base resources shared by both DEV and PROD overlays.
+# Environment-specific configuration is applied via overlay patches.
+resources:
+  - deployment.yaml
+  - service.yaml
+
+# Common labels applied to all resources generated from this base.
+commonLabels:
+  app: ticket-triage
+  project: multilingual-ticket-triage
+  managed-by: kustomize

@@ -1,0 +1,152 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ticket-triage
+  labels:
+    app: ticket-triage
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ticket-triage
+  template:
+    metadata:
+      labels:
+        app: ticket-triage
+    spec:
+      # ── Security Context (Pod-level) ────────────────────────────────────────
+      # Run as non-root user matching the image USER directive (appuser UID 1000).
+      # fsGroup 1000 ensures volume mounts are group-accessible to appuser.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+
+      # ── Host DNS alias for Ollama ───────────────────────────────────────────
+      # host.docker.internal resolves via Docker Desktop's embedded DNS
+      # (192.168.65.254) and is confirmed reachable from kind Pods.
+      # Kept explicit here for documentation; no additional hostAliases needed.
+
+      # ── Containers ─────────────────────────────────────────────────────────
+      containers:
+        - name: api
+          # imagePullPolicy Never: image is pre-loaded into the kind node's
+          # containerd store via `docker save | ctr -n k8s.io images import`.
+          # Kubernetes must NOT attempt to pull from a remote registry.
+          image: ticket-triage-api:latest
+          imagePullPolicy: Never
+
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+
+          # ── Environment (all vars supplied by overlay ConfigMap) ────────────
+          # The envFrom block loads all keys from the overlay-specific ConfigMap.
+          # Overlay patches inject the correct ConfigMap name per environment.
+          envFrom:
+            - configMapRef:
+                name: ticket-triage-config
+
+          # ── Security Context (container-level) ─────────────────────────────
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            # readOnlyRootFilesystem is set to false because Python writes
+            # __pycache__ files into /app source directories at import time.
+            # All data/model directories use dedicated volume mounts.
+            readOnlyRootFilesystem: false
+
+          # ── Volume Mounts ───────────────────────────────────────────────────
+          volumeMounts:
+            # HuggingFace model cache — populated once and shared read-only.
+            # Both DEV and PROD read from the same staged cache on the node.
+            - name: hf-cache
+              mountPath: /home/appuser/.cache/huggingface
+
+            # Application data (DuckDB + LanceDB) — environment-specific copy.
+            # Mounted read-only to prevent accidental writes.
+            - name: app-data
+              mountPath: /app/data
+              readOnly: true
+
+            # Writable outputs for triage result files.
+            - name: outputs
+              mountPath: /app/outputs
+
+          # ── Startup Probe ───────────────────────────────────────────────────
+          # Allows up to 5 min (30 × 10s) for cold start with embedding model load.
+          # /health returns 200 as soon as uvicorn accepts connections, but
+          # /ready only flips to true after agent initialization completes.
+          # We probe /health here so the startup window covers the full boot.
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            failureThreshold: 30
+            timeoutSeconds: 5
+
+          # ── Liveness Probe ──────────────────────────────────────────────────
+          # Detects a stuck/crashed server process. Only started after
+          # startupProbe succeeds. Uses /health (lightweight, always 200).
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            periodSeconds: 30
+            failureThreshold: 3
+            timeoutSeconds: 5
+
+          # ── Readiness Probe ─────────────────────────────────────────────────
+          # Gates traffic to the Pod. Uses /ready which returns ready=true only
+          # after the agent (embedding model + LanceDB + LLM client) is fully
+          # initialized. Pod will not receive requests until ready=true.
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 8000
+            periodSeconds: 10
+            failureThreshold: 6
+            timeoutSeconds: 5
+
+          # ── Resource Requests / Limits ──────────────────────────────────────
+          # Baseline values; overlays patch these per environment.
+          # The E5-large embedding model requires ~2 GB RSS after loading.
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "2Gi"
+            limits:
+              cpu: "2000m"
+              memory: "5Gi"
+
+      # ── Volumes ─────────────────────────────────────────────────────────────
+      volumes:
+        # HuggingFace model cache staged into the kind node at /data/hf-cache.
+        # Both environments use the same shared read path.
+        - name: hf-cache
+          hostPath:
+            path: /data/hf-cache
+            type: Directory
+
+        # Application data directory — path overridden per overlay via patch.
+        # Default points to a non-existent path to force overlay configuration.
+        - name: app-data
+          hostPath:
+            path: /data/app-data-base
+            type: Directory
+
+        # Ephemeral outputs volume — reset on Pod restart.
+        - name: outputs
+          emptyDir: {}
+
+      # ── Restart Policy ───────────────────────────────────────────────────────
+      restartPolicy: Always
+
+      # ── Termination Grace ────────────────────────────────────────────────────
+      terminationGracePeriodSeconds: 30

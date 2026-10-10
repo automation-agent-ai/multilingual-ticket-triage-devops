@@ -1,0 +1,31 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ticket-triage
+  namespace: triage-prod
+spec:
+  template:
+    spec:
+      # ── Volumes (PROD-specific paths) ───────────────────────────────────────
+      volumes:
+        - name: hf-cache
+          hostPath:
+            path: /data/hf-cache
+            type: Directory
+        - name: app-data
+          hostPath:
+            path: /data/app-data-prod
+            type: Directory
+        - name: outputs
+          emptyDir: {}
+
+      containers:
+        - name: api
+          # ── Resource Limits (PROD — tighter ceiling) ───────────────────────
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "2Gi"
+            limits:
+              cpu: "2000m"
+              memory: "5Gi"

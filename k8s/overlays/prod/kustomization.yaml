@@ -1,0 +1,26 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# PROD overlay — triage-prod namespace
+namespace: triage-prod
+
+resources:
+  - ../../base
+  - namespace.yaml
+  - configmap.yaml
+
+# Additional labels for the PROD environment.
+commonLabels:
+  environment: prod
+
+# Strategic merge patches applied on top of the base resources.
+patches:
+  - path: patches/deployment.yaml
+    target:
+      kind: Deployment
+      name: ticket-triage
+
+# Image tag override — use the pre-loaded local image.
+images:
+  - name: ticket-triage-api
+    newTag: latest

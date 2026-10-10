@@ -1,0 +1,33 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ticket-triage
+  namespace: triage-dev
+spec:
+  template:
+    spec:
+      # ── Volumes (DEV-specific paths) ────────────────────────────────────────
+      # Strategic merge patch replaces the volume with matching name.
+      # /data/app-data-dev is staged from the WSL source data/ directory.
+      volumes:
+        - name: hf-cache
+          hostPath:
+            path: /data/hf-cache
+            type: Directory
+        - name: app-data
+          hostPath:
+            path: /data/app-data-dev
+            type: Directory
+        - name: outputs
+          emptyDir: {}
+
+      containers:
+        - name: api
+          # ── Resource Limits (DEV — more generous for debugging) ────────────
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "2Gi"
+            limits:
+              cpu: "2000m"
+              memory: "6Gi"

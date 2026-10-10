@@ -1,0 +1,35 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ticket-triage-config
+  namespace: triage-dev
+  labels:
+    environment: dev
+    app: ticket-triage
+data:
+  # ── Ollama connection ──────────────────────────────────────────────────────
+  # host.docker.internal resolves to Docker Desktop's host DNS (192.168.65.254)
+  # from inside kind Pods — verified working in Stage A inspection.
+  OLLAMA_BASE_URL: "http://host.docker.internal:11434"
+
+  # ── Application config ─────────────────────────────────────────────────────
+  CONFIG_PATH: "/app/config.yaml"
+  HOST: "0.0.0.0"
+  PORT: "8000"
+
+  # DEV: enable uvicorn auto-reload for iteration convenience.
+  RELOAD: "true"
+
+  # ── Inference ─────────────────────────────────────────────────────────────
+  INFERENCE_CONCURRENCY: "1"
+
+  # ── HuggingFace cache ─────────────────────────────────────────────────────
+  HF_HOME: "/home/appuser/.cache/huggingface"
+  TRANSFORMERS_CACHE: "/home/appuser/.cache/huggingface/hub"
+  TOKENIZERS_PARALLELISM: "false"
+
+  # ── Python ────────────────────────────────────────────────────────────────
+  PYTHONUNBUFFERED: "1"
+
+  # ── Environment tag ───────────────────────────────────────────────────────
+  ENVIRONMENT: "dev"
