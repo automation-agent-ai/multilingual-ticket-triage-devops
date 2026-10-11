@@ -186,14 +186,13 @@ jobs:
         env:
           KUBECONFIG: ${{ steps.kubeconfig.outputs.path }}
         run: |
-          echo "Rendering manifests and filtering out Namespace resource..."
+          # Render manifests and strip the Namespace document.
+          # The cicd-deployer SA has no GET on cluster-scoped Namespace resources.
+          # The triage-dev namespace already exists; no need to manage it via CD.
+          # Python one-liner keeps the YAML literal block valid (no unindented lines).
           kubectl kustomize k8s/ci-overlays/dev \
-            | python3 -c "
-import sys, re
-docs = sys.stdin.read().split('\n---\n')
-filtered = [d for d in docs if not re.search(r'^kind:\s*Namespace', d, re.MULTILINE)]
-print('\n---\n'.join(filtered))
-" > /tmp/deploy-dev-manifests.yaml
+            | python3 -c "import sys,re; docs=sys.stdin.read().split('\n---\n'); filtered=[d for d in docs if not re.search(r'^kind:\s*Namespace',d,re.M)]; print('\n---\n'.join(filtered))" \
+            > /tmp/deploy-dev-manifests.yaml
 
           echo "Applying to namespace: ${{ env.NAMESPACE }}"
           kubectl apply -f /tmp/deploy-dev-manifests.yaml
