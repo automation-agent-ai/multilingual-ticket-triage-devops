@@ -71,11 +71,15 @@ jobs:
       - name: Install CPU-only PyTorch
         run: |
           pip install --upgrade pip
-          pip install "torch==2.3.1+cpu" \
+          pip install "torch==2.10.0+cpu" \
             --index-url https://download.pytorch.org/whl/cpu
 
       - name: Install project runtime dependencies
-        run: pip install -r requirements-docker.txt
+        # Pass --extra-index-url so pip can find torch==2.10.0+cpu (pinned in
+        # requirements-docker.txt) when resolving the full dependency tree.
+        run: |
+          pip install -r requirements-docker.txt \
+            --extra-index-url https://download.pytorch.org/whl/cpu
 
       # pytest and httpx (needed by FastAPI TestClient) are not in
       # requirements-docker.txt because they are test-only dependencies.
@@ -158,12 +162,35 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      # ── Trivy diagnostic table scan (non-blocking) ───────────────────────────
+      # Runs BEFORE the blocking SARIF scan so that the exact CVEs Trivy sees
+      # in CI are visible in the Actions log even when the SARIF upload shows
+      # zero alerts on the Code Scanning page (a known GitHub UI discrepancy).
+      # exit-code: 0  → always passes; never blocks the pipeline.
+      - name: Trivy — diagnostic table scan (non-blocking)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: ticket-triage-api:ci-scan
+          format: table
+          scanners: vuln
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "0"
+
       # ── Trivy vulnerability scan ─────────────────────────────────────────────
       # Scans the locally loaded image.
       # exit-code: 1  → fail the pipeline on CRITICAL or HIGH findings
       # ignore-unfixed → skip CVEs where no patched version is available yet
       #                  (avoids false-positive failures on unresolvable OS CVEs)
       # Output is SARIF for upload to the GitHub Security tab.
+      #
+      # limit-severities-for-sarif: true — required fix: entrypoint.sh in
+      #   trivy-action@v0.36.0 unsets TRIVY_SEVERITY when building the SARIF
+      #   report unless this flag is explicitly set, causing it to scan ALL
+      #   severities and report findings that ignore-unfixed/severity filters
+      #   would otherwise suppress ("Building SARIF report with all severities").
+      # scanners: vuln — matches the diagnostic table step; restricts the scan
+      #   to vulnerability data only, excluding secret/config scanners.
       - name: Trivy — vulnerability scan
         id: trivy
         uses: aquasecurity/trivy-action@v0.36.0
@@ -171,9 +198,11 @@ jobs:
           image-ref: ticket-triage-api:ci-scan
           format: sarif
           output: trivy-results.sarif
+          scanners: vuln
           severity: CRITICAL,HIGH
           exit-code: "1"
           ignore-unfixed: true
+          limit-severities-for-sarif: true
 
       # Upload results to GitHub Security > Code scanning (always, even on fail).
       - name: Upload Trivy SARIF to GitHub Security

@@ -31,17 +31,25 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /build
 
 # ── Layer 1: PyTorch CPU wheel (large; cached separately for faster rebuilds) ─
-# Pin to a stable CPU-only release.  Isolate this layer so a requirements
-# update does not re-download ~750 MB of PyTorch wheels.
+# torch 2.3.1+cpu → 2.10.0+cpu: fixes CVE-2025-32434 (CRITICAL) +
+# GHSA-63cw-57p8-fm3p (HIGH — RCE via untrusted checkpoints, patched in 2.10.0)
+# deserialization in torch.load()).  CPU-only wheel from the PyTorch index.
+# Isolated in its own layer so a requirements update does not re-download PyTorch.
 COPY requirements-docker.txt .
 RUN pip install --no-cache-dir --upgrade pip \
  && pip install --no-cache-dir \
-        "torch==2.3.1+cpu" \
+        "torch==2.10.0+cpu" \
         --index-url https://download.pytorch.org/whl/cpu
 
 # ── Layer 2: remaining Python dependencies ────────────────────────────────────
-# requirements-docker.txt does NOT include torch (handled above).
-RUN pip install --no-cache-dir -r requirements-docker.txt
+# requirements-docker.txt now contains torch==2.10.0+cpu as an explicit pin,
+# which prevents pip's resolver from upgrading torch to the latest CUDA release
+# (triggered by sentence-transformers' torch>=1.11.0 constraint).
+# The --extra-index-url is required so pip can locate the +cpu wheel; without
+# it torch==2.10.0+cpu is not found on PyPI and the install fails.
+RUN pip install --no-cache-dir \
+        --extra-index-url https://download.pytorch.org/whl/cpu \
+        -r requirements-docker.txt
 
 # ── Stage 2: runtime image ────────────────────────────────────────────────────
 FROM python:3.12-slim AS runtime
@@ -78,6 +86,19 @@ COPY --chown=appuser:appgroup config.yaml ./config.yaml
 # HuggingFace cache inside appuser home so the non-root user can write to it.
 RUN mkdir -p /app/data /app/outputs \
  && chown -R appuser:appgroup /app
+
+# ── Remove pip and setuptools from the runtime image ─────────────────────────
+# The runtime container never needs to install packages.  Removing these tools
+# eliminates:
+#   • setuptools CVE-2025-47273 (HIGH — path traversal in PackageIndex)
+#   • msgpack GHSA-6v7p-g79w-8964 (HIGH — OOB read/crash in pip's vendored
+#     msgpack, bundled inside pip/_vendor/msgpack)
+# The pip executables and dist-info directories are also removed to prevent
+# accidental re-introduction of the packages.
+RUN find /usr/local/lib/python3.12/site-packages -maxdepth 1 \
+        \( -name "pip*" -o -name "setuptools*" \) \
+        -exec rm -rf {} + 2>/dev/null || true \
+ && find /usr/local/bin -name "pip*" -delete 2>/dev/null || true
 
 # ── Environment defaults ──────────────────────────────────────────────────────
 # All of these are overridden at runtime via environment variables or compose

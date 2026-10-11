@@ -1,19 +1,37 @@
 # Docker runtime requirements — CPU build.
 #
-# torch is installed separately in the Dockerfile from the PyTorch CPU wheel
-# index (download.pytorch.org/whl/cpu) to keep the image lean.  Do NOT add
-# torch here; it would pull the full CUDA build from PyPI instead.
+# torch==2.10.0+cpu is pinned here AND installed separately in the Dockerfile
+# (for Docker layer caching).  The +cpu local-version suffix means pip must
+# be given --extra-index-url https://download.pytorch.org/whl/cpu so it can
+# find this exact build.  Without the pin, pip's resolver will upgrade torch
+# to the latest CUDA release when it sees sentence-transformers' torch>=1.11.0
+# constraint.
 #
-# Versions are pinned for reproducibility.  Update by running:
-#   pip freeze > requirements-docker.txt  (then remove torch + CUDA lines)
+# S05b security update — see docs/CICD.md §S05b for CVE remediation matrix.
 
 # ── NLP / embeddings ──────────────────────────────────────────────────────────
-sentence-transformers==4.1.0
-transformers==4.57.6
-tokenizers==0.22.2
+# sentence-transformers  4.1.0 → 5.6.0  (CVE-2026-68770  CRITICAL — RCE via security control bypass)
+# transformers           4.57.6 → 5.10.1 (CVE-2026-4372 / CVE-2026-5241 / CVE-2026-9856  HIGH;
+#                                          5.10.0 yanked — week-old main branch, missing fixes)
+# huggingface_hub        0.36.2 → 1.33.0 (required by transformers>=5.x: >=1.5.0,<2.0.0)
+# torch                  2.3.1+cpu → 2.10.0+cpu (CVE-2025-32434  CRITICAL — unsafe torch.load deserialization;
+#                                                  GHSA-63cw-57p8-fm3p  HIGH — RCE via untrusted checkpoint files, patched in 2.10.0)
+torch==2.10.0+cpu
+sentence-transformers==5.6.0
+transformers==5.10.1
+tokenizers==0.22.2     # satisfies transformers 5.10.1 constraint: >=0.22.0,<=0.23.0
 safetensors==0.8.0
-huggingface_hub==0.36.2
+huggingface_hub==1.33.0
 tqdm==4.68.4
+
+# ── New transitive deps pulled in by huggingface-hub>=1.5.0 ──────────────────
+# hf-xet is required on x86_64/amd64 by huggingface-hub>=1.5.0 (Rust extension).
+# httpx + httpcore are the HTTP client used by huggingface-hub 1.x (replaced requests).
+# typer is required by both huggingface-hub 1.5.0+ and transformers 5.x.
+hf-xet==1.7.0
+httpx==0.28.1
+httpcore==1.0.9
+typer==0.9.4
 
 # ── Core data and ML ──────────────────────────────────────────────────────────
 numpy==1.26.4
@@ -23,12 +41,14 @@ scipy==1.17.1
 joblib==1.5.3
 
 # ── Storage ───────────────────────────────────────────────────────────────────
-# Versions must match those used to write the existing DuckDB and LanceDB files.
+# lancedb 0.40.0 requires pyarrow>=16; 23.0.1 fixes CVE-2026-25087 (HIGH).
+# Existing Lance files (written with pyarrow 20.x) are forward-readable.
 duckdb==1.5.6
 lancedb==0.40.0
 lance-namespace==0.13.0
 lance-namespace-urllib3-client==0.13.0
-pyarrow==20.0.0
+# pyarrow 20.0.0 → 23.0.1 (CVE-2026-25087  HIGH — use-after-free / DoS)
+pyarrow==23.0.1
 
 # ── FastAPI / HTTP server ─────────────────────────────────────────────────────
 fastapi==0.143.0
@@ -48,7 +68,8 @@ opentelemetry-api==1.45.1
 PyYAML==6.0.3
 python-dotenv==1.2.2
 requests==2.34.2
-urllib3==2.7.0
+# urllib3 2.7.0 → 2.8.0 (CVE-2026-97687 / CVE-2026-97689  HIGH)
+urllib3==2.8.0
 charset-normalizer==3.4.9
 certifi==2026.6.17
 idna==3.18
@@ -62,7 +83,7 @@ filelock==3.29.7
 fsspec==2026.6.0
 packaging==26.0
 regex==2026.6.28
-sympy==1.14.0
+sympy==1.13.3    # torch==2.10.0+cpu requires sympy>=1.13.3 (minimum; 1.13.1 required by 2.6.0 was too old)
 mpmath==1.3.0
 networkx==3.6.1
 pillow==12.3.0
