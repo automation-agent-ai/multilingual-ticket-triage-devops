@@ -162,6 +162,21 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      # ── Trivy diagnostic table scan (non-blocking) ───────────────────────────
+      # Runs BEFORE the blocking SARIF scan so that the exact CVEs Trivy sees
+      # in CI are visible in the Actions log even when the SARIF upload shows
+      # zero alerts on the Code Scanning page (a known GitHub UI discrepancy).
+      # exit-code: 0  → always passes; never blocks the pipeline.
+      - name: Trivy — diagnostic table scan (non-blocking)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: ticket-triage-api:ci-scan
+          format: table
+          scanners: vuln
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "0"
+
       # ── Trivy vulnerability scan ─────────────────────────────────────────────
       # Scans the locally loaded image.
       # exit-code: 1  → fail the pipeline on CRITICAL or HIGH findings
