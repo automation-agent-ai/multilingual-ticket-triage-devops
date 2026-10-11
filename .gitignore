@@ -60,3 +60,13 @@ kaggle.json
 # Generated submission archive
 ticket_triage_agent.zip
 
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+crash.log
+crash.*.log
+*.tfplan
+*.tfvars
+!terraform/terraform.tfvars.example
+
