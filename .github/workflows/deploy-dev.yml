@@ -251,9 +251,11 @@ jobs:
           echo "✅ Image provenance confirmed."
 
       # ── Rollback on failure ──────────────────────────────────────────────
-      # Runs only if apply or rollout steps fail.
+      # Runs only if the apply succeeded but the rollout itself failed.
+      # Does NOT run for smoke-test step failures (exec/verify errors
+      # are post-deployment checks, not deployment failures).
       - name: Rollback on failure
-        if: failure() && steps.apply.outcome == 'success'
+        if: failure() && steps.apply.outcome == 'success' && steps.rollout.outcome == 'failure'
         env:
           KUBECONFIG: ${{ steps.kubeconfig.outputs.path }}
         run: |

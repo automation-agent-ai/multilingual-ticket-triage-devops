@@ -82,10 +82,16 @@ rules:
     resources: ["replicasets"]
     verbs: ["get", "list", "watch"]
 
-  # Pods — readiness probe and smoke-test verification
+  # Pods — readiness probe, smoke-test verification, and exec for health checks
   - apiGroups: [""]
     resources: ["pods"]
     verbs: ["get", "list", "watch"]
+
+  # pods/exec — required for `kubectl exec` smoke-test (GET /health, /ready, /metrics)
+  # Scoped to triage-dev namespace only; no cluster-wide exec access.
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create"]
 
   # Services — connectivity verification after deploy
   - apiGroups: [""]
