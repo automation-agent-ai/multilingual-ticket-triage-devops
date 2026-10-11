@@ -387,15 +387,21 @@ curl -s -X POST http://localhost:8080/triage \
 | Docker push to GHCR | ✅ CI | `ghcr.io/automation-agent-ai/multilingual-ticket-triage-devops:sha-<sha>` |
 | Trivy scan | ✅ CI | 54 unfixed HIGH OS CVEs; gate passing (`ignore-unfixed: true`) |
 
-### Sprint S05c — CD activation (configured, runner pending approval)
+### Sprint S05c — CD activation (fully verified)
 
 | Stage | Status | Notes |
 |---|---|---|
-| RBAC manifests (`k8s/runner/rbac.yaml`) | ✅ Created | Not yet applied — awaiting runner approval |
-| `scripts/generate-runner-kubeconfig.sh` | ✅ Created | Generates KUBECONFIG_DEV; not yet run |
-| `scripts/install-runner.sh` | ✅ Created | Guarded by `APPROVED=yes`; not yet executed |
-| `deploy-dev.yml` updated (real apply) | ✅ Implemented | Runs on `triage-dev-deployer` label |
-| Self-hosted runner registered | ⏳ Pending approval | See §6 and Phase 3 checkpoint |
-| `KUBECONFIG_DEV` GitHub secret set | ⏳ Pending | After runner approval and RBAC apply |
-| DEV `kubectl apply` via GitHub Actions | ⏳ Pending | After runner online |
-| PROD `kubectl apply` | ⏳ Not planned | PROD workflow remains dry-run only |
+| RBAC manifests (`k8s/runner/rbac.yaml`) | ✅ Applied | `cicd-deployer` SA, Role, RoleBinding, token Secret |
+| `scripts/generate-runner-kubeconfig.sh` | ✅ Run | KUBECONFIG_DEV generated and uploaded to GitHub |
+| `scripts/install-runner.sh` | ✅ Executed | Runner online as `liora-dev-deployer-wsl2` (v2.338.0) |
+| `deploy-dev.yml` updated (real apply) | ✅ Active | Runs on `triage-dev-deployer` label |
+| Self-hosted runner registered | ✅ Online | `liora-dev-deployer-wsl2` — Listening for Jobs |
+| `KUBECONFIG_DEV` GitHub secret | ✅ Set | `dev` environment, `cicd-deployer` SA token |
+| DEV `kubectl apply` via GitHub Actions | ✅ Verified | Run [38149164214](https://github.com/automation-agent-ai/multilingual-ticket-triage-devops/actions/runs/38149164214) — all 15 steps green |
+| DEV rollout verified | ✅ Verified | `kubectl rollout status` — success in run 38149164214 |
+| DEV smoke test: `/health` | ✅ `{"status":"ok"}` | via `kubectl exec` in GitHub Actions |
+| DEV smoke test: `/ready` | ✅ `{"ready":true,"agent_initialized":true}` | via `kubectl exec` in GitHub Actions |
+| DEV smoke test: POST `/triage` | ✅ HTTP 200 | Local port-forward; full AI response returned |
+| DEV image provenance | ✅ Confirmed | `ghcr.io/automation-agent-ai/multilingual-ticket-triage-devops:sha-72c3ee1be6ef0bb748bfc40d56f5bf364ee03ac6` |
+| Prometheus scrape DEV | ⚠️ `down` | GHCR image from commit `72c3ee1` predates `/metrics` endpoint (added in local `s07-metrics` only) |
+| PROD `kubectl apply` | ✅ Not executed | PROD workflow intentionally dry-run; PROD cluster unchanged |
