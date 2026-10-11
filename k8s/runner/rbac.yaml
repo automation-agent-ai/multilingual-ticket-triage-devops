@@ -1,0 +1,122 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# RBAC — GitHub Actions CI/CD deployer identity (triage-dev only)
+#
+# Purpose:
+#   Provides a least-privilege Kubernetes identity for the self-hosted GitHub
+#   Actions runner to deploy to the triage-dev namespace exclusively.
+#
+# Resources created:
+#   1. ServiceAccount  cicd-deployer  (triage-dev)
+#   2. Secret          cicd-deployer-token  (long-lived SA token for kubeconfig)
+#   3. Role            cicd-deployer-role   (triage-dev)
+#   4. RoleBinding     cicd-deployer-binding (triage-dev)
+#
+# Permissions granted (triage-dev namespace ONLY):
+#   • deployments:   get, list, watch, update, patch   → apply + rollout status
+#   • replicasets:   get, list, watch                  → rollout status resolution
+#   • pods:          get, list, watch                  → readiness verification
+#   • services:      get, list                         → smoke-test connectivity check
+#   • configmaps:    get, list                         → resolve ConfigMap refs
+#   • events:        get, list                         → failure diagnostics
+#
+# Permissions NOT granted (security boundary):
+#   • No cluster-level resources (nodes, namespaces, PVs, CRDs)
+#   • No secrets (prevents token exfiltration from other namespaces)
+#   • No RBAC resources (prevents privilege escalation)
+#   • No triage-prod namespace access (zero cross-environment reach)
+#   • No exec/attach/portforward (no interactive shell access)
+#
+# Apply:
+#   kubectl apply -k k8s/runner/
+#
+# After applying, run:
+#   scripts/generate-runner-kubeconfig.sh
+# to produce a scoped kubeconfig for the KUBECONFIG_DEV GitHub secret.
+# ──────────────────────────────────────────────────────────────────────────────
+
+---
+# 1 — Deployment identity
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cicd-deployer
+  namespace: triage-dev
+  labels:
+    app.kubernetes.io/component: cicd
+    app.kubernetes.io/managed-by: kubectl
+
+---
+# 2 — Long-lived token bound to the ServiceAccount
+# Kubernetes 1.24+ no longer auto-creates SA secrets; we create one explicitly.
+# The token is used exclusively by the self-hosted runner's kubeconfig.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: cicd-deployer-token
+  namespace: triage-dev
+  labels:
+    app.kubernetes.io/component: cicd
+    app.kubernetes.io/managed-by: kubectl
+  annotations:
+    kubernetes.io/service-account.name: cicd-deployer
+type: kubernetes.io/service-account-token
+
+---
+# 3 — Least-privilege role (triage-dev namespace only)
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: cicd-deployer-role
+  namespace: triage-dev
+  labels:
+    app.kubernetes.io/component: cicd
+    app.kubernetes.io/managed-by: kubectl
+rules:
+  # Deployments — apply image update and monitor rollout
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+
+  # ReplicaSets — required by `kubectl rollout status` to track pod replacement
+  - apiGroups: ["apps"]
+    resources: ["replicasets"]
+    verbs: ["get", "list", "watch"]
+
+  # Pods — readiness probe and smoke-test verification
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+
+  # Services — connectivity verification after deploy
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "list"]
+
+  # ConfigMaps — resolve envFrom references in the Deployment spec
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list"]
+
+  # Events — failure diagnostics (read-only)
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["get", "list"]
+
+---
+# 4 — Bind the role to the ServiceAccount
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: cicd-deployer-binding
+  namespace: triage-dev
+  labels:
+    app.kubernetes.io/component: cicd
+    app.kubernetes.io/managed-by: kubectl
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: cicd-deployer-role
+subjects:
+  - kind: ServiceAccount
+    name: cicd-deployer
+    namespace: triage-dev

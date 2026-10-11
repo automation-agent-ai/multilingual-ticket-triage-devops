@@ -22,7 +22,8 @@ Developer workstation (WSL2 / Docker Desktop)
 GitHub (remote)
 ├── GitHub Actions CI (test → build → Trivy scan → GHCR push)
 ├── GHCR (ghcr.io/automation-agent-ai/multilingual-ticket-triage-devops)
-└── deploy-dev / deploy-prod workflows (dry-run; kubectl apply disabled)
+└── deploy-dev workflow (real kubectl apply — self-hosted runner; runner pending approval)
+└── deploy-prod workflow (dry-run; kubectl apply intentionally disabled)
 ```
 
 ---
@@ -35,8 +36,8 @@ flowchart TD
         GHA["GitHub Actions CI\n(push/PR → main)"]
         TRIVY["Trivy Scanner\nCRITICAL/HIGH gate\nignore-unfixed: true"]
         GHCR["GHCR\nghcr.io/automation-agent-ai/…\n:sha-<40-char-sha>  :latest"]
-        DEPLOY_DEV["deploy-dev workflow\n(automatic, after CI)\nkubectl apply DISABLED"]
-        DEPLOY_PROD["deploy-prod workflow\n(manual + approval)\nkubectl apply DISABLED"]
+        DEPLOY_DEV["deploy-dev workflow\n(workflow_run / dispatch)\nself-hosted runner\nkubectl apply ENABLED"]
+        DEPLOY_PROD["deploy-prod workflow\n(manual + approval)\nkubectl apply DISABLED\n(PROD unchanged)"]
     end
 
     subgraph K8S["Kubernetes — docker-desktop (kind)"]
@@ -76,8 +77,8 @@ flowchart TD
     %% CI pipeline
     GHA -->|"1 pytest 744 tests\n(-m not slow)"| TRIVY
     TRIVY -->|"2 blocking scan\nexit-code 1"| GHCR
-    GHCR -.->|"dry-run only\nkubectl apply disabled"| DEPLOY_DEV
-    GHCR -.->|"dry-run only\nkubectl apply disabled"| DEPLOY_PROD
+    GHCR -->|"kubectl apply\nself-hosted runner\ntriage-dev only"| DEPLOY_DEV
+    GHCR -.->|"dry-run only\nPROD unchanged"| DEPLOY_PROD
 
     %% Monitoring scrape (DEV only)
     PROM -->|"scrape /metrics\nevery 30s"| API_DEV
@@ -115,7 +116,8 @@ flowchart TD
 | Kubernetes DEV/PROD deploy | Kustomize overlays | S04 | `k8s/overlays/{dev,prod}` |
 | GitHub Actions CI | Workflow | S05 | `.github/workflows/ci.yml` |
 | Trivy scan + GHCR push | CI step | S05b | `.github/workflows/ci.yml` |
-| Deploy workflows (dry-run) | Workflow | S05 | `.github/workflows/deploy-{dev,prod}.yml` |
+| Deploy-DEV workflow (real apply, self-hosted runner) | Workflow | S05c | `.github/workflows/deploy-dev.yml`, `k8s/runner/rbac.yaml` |
+| Deploy-PROD workflow (dry-run, approval gate) | Workflow | S05 | `.github/workflows/deploy-prod.yml` |
 | Terraform monitoring infra | HCL | S06 | `terraform/` |
 | Prometheus + Grafana | Kustomize | S07 | `monitoring/` |
 | Security audit + hardening | Documentation | S08 | `docs/SECURITY.md` |
@@ -204,7 +206,7 @@ TriageResult (topic, urgency, next_action, confidence, flags, action_result)
 
 | Limitation | Impact |
 |---|---|
-| `kubectl apply` disabled in all deploy workflows | No automated cluster deployment from CI/CD |
+| `kubectl apply` enabled in deploy-dev via self-hosted runner | Runner not yet registered (pending explicit approval); PROD remains dry-run |
 | PROD image has no `/metrics` endpoint | PROD not monitored by Prometheus |
 | `s07-metrics` image not in GHCR | DEV runs a locally built image only |
 | Terraform state is local (`terraform.tfstate`) | State lost if disk fails; remote backend not configured |

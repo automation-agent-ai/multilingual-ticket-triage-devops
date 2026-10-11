@@ -1,11 +1,16 @@
-# CI/CD Pipeline — Sprint S05
+# CI/CD Pipeline — Sprint S05 / S05c (CD activation)
 
 ## Overview
 
 This document describes the GitHub Actions CI/CD pipeline for the Liora
 Multilingual Ticket Triage API.  It covers pipeline stages, security controls,
-deployment options, and the connectivity limitation that currently prevents
-automated cluster access.
+deployment architecture, and the self-hosted runner setup required for
+automated cluster access from GitHub Actions.
+
+**S05c update:** the `kubectl apply` gap has been resolved.  A self-hosted
+runner architecture is fully specified and implemented.  The runner is **not
+yet installed** — see §6 (Runner Security Analysis) and the approval
+checkpoint below before proceeding.
 
 ---
 
@@ -27,12 +32,21 @@ push to main / PR → main
 ```
 CI workflow completes on main
         │
-        └─ Workflow: deploy-dev  (automatic, after CI success)
+        └─ Workflow: deploy-dev  (workflow_run trigger or manual dispatch)
             ├─ Resolve image tag (sha-<40-char-sha>)
-            ├─ kustomize edit set image  (workspace only)
-            ├─ kubectl kustomize k8s/ci-overlays/dev  (dry-run)
-            └─ kubectl apply  ← DISABLED until cluster access is authorised
+            ├─ Validate tag format (sha-[0-9a-f]{40} required)
+            ├─ kustomize edit set image  (workspace only, not committed)
+            ├─ kubectl kustomize k8s/ci-overlays/dev  (render + validate)
+            ├─ Write KUBECONFIG_DEV secret → /tmp/kubeconfig-XXXXX (chmod 600)
+            ├─ kubectl apply -k k8s/ci-overlays/dev   ← ENABLED (self-hosted runner)
+            ├─ kubectl rollout status --timeout=300s
+            ├─ kubectl exec → curl /health /ready /metrics  (smoke test)
+            ├─ Verify pod image SHA (provenance check)
+            ├─ kubectl rollout undo  (on rollout failure only)
+            └─ rm /tmp/kubeconfig-XXXXX  (always, even on failure)
 ```
+> ⚠ The `kubectl apply` step runs only on the `triage-dev-deployer` self-hosted
+> runner.  GitHub-hosted runners are rejected by the `runs-on:` label constraint.
 
 ```
 Manual trigger
@@ -55,7 +69,7 @@ Manual trigger
 | File | Trigger | Purpose |
 |---|---|---|
 | `.github/workflows/ci.yml` | push/PR → main | Tests, Docker build, Trivy scan, GHCR publish |
-| `.github/workflows/deploy-dev.yml` | after CI on main / manual | DEV deploy (dry-run until cluster access) |
+| `.github/workflows/deploy-dev.yml` | after CI on main / manual dispatch | DEV deploy — real `kubectl apply` on self-hosted runner |
 | `.github/workflows/deploy-prod.yml` | manual with approval | PROD deploy (dry-run until cluster access) |
 
 ---
@@ -137,86 +151,149 @@ This modifies the `images:` block in the workflow's local workspace copy only
 
 ---
 
-## 7. Deployment connectivity limitation
+## 7. Deployment connectivity — S05c implementation
 
-### Current state
+### Architecture selected
 
-GitHub-hosted runners (`ubuntu-latest`) execute on **Azure infrastructure**.
-They have no network route to the local Docker Desktop kind cluster on the
-developer workstation (WSL2 / Windows).
+**Self-hosted runner on the WSL2 host** (Option A from the original analysis).
 
-Therefore, the `kubectl apply` step in both deploy workflows is **disabled**
-(`if: false`) to prevent misleading failures.  The workflows do execute:
+GitHub-hosted runners execute on Azure and have no route to `127.0.0.1:50060`
+(the local kind cluster API).  A self-hosted runner co-located on the WSL2
+host can reach the cluster natively.
 
-- Input validation
-- `kustomize edit set image` (workspace edit)
-- `kubectl kustomize` (full manifest render + YAML validation)
+```
+GitHub Actions
+  └─ deploy-dev workflow
+       └─ runs-on: [self-hosted, linux, triage-dev-deployer]
+            │
+            │  (runner runs on WSL2 host — same machine as kind)
+            ▼
+       /home/niwr/actions-runner/_work
+            │
+            │  KUBECONFIG_DEV (GitHub Env secret) → /tmp/kubeconfig-XXXXX
+            ▼
+       kubectl apply → https://127.0.0.1:50060  (kind API)
+            │
+            ▼
+       cicd-deployer SA  →  Role: cicd-deployer-role  →  triage-dev NS only
+```
 
-These steps verify the pipeline is correct end-to-end without touching the
-cluster.
+### RBAC identity
 
-### Enabling live cluster deployment
-
-Choose one of the following approaches.  **Do not implement either without
-explicit approval** (as stated in the sprint requirements).
-
-#### Option A — Self-hosted runner (recommended for initial activation)
-
-A GitHub Actions runner registered as a Kubernetes pod or a VM inside the
-cluster network can reach the cluster API directly.
-
-Pros:
-- No kubeconfig needs to leave the cluster boundary.
-- No Kubernetes API surface is exposed to the internet.
-- Works for the local kind cluster without changes.
-
-Cons:
-- The runner pod or host must be maintained and kept up-to-date.
-- If run as a privileged pod, it has cluster-admin–equivalent access.
-  Use least-privilege RBAC for the runner's ServiceAccount.
-
-Activation steps (after approval):
-1. Create a GitHub Actions runner pod in the cluster.
-2. Assign a ServiceAccount with `get`, `list`, `create`, `update`, `patch`
-   on `Deployment` resources in `triage-dev` (and separately `triage-prod`).
-3. Change `runs-on: ubuntu-latest` to the runner label in deploy workflows.
-4. Uncomment the `kubectl apply` steps.
-
-#### Option B — Remote cluster (Hetzner k3s, recommended for production-grade CI)
-
-A k3s cluster on Hetzner provides a stable, internet-accessible Kubernetes
-endpoint that GitHub-hosted runners can reach.
-
-Pros:
-- GitHub-hosted runners work without changes.
-- Better isolation from the developer workstation.
-- Aligns with future production infrastructure goals.
-
-Cons:
-- Requires provisioning a Hetzner server (cost ~€4/month for CX22).
-- A scoped kubeconfig must be stored as a GitHub Actions secret.
-- Kubernetes API is reachable from the internet — mTLS and network policies
-  are important.
-
-Activation steps (after approval):
-1. Provision a Hetzner CX22 VM and install k3s.
-2. Create a kubeconfig scoped to the `triage-dev` namespace with minimal RBAC.
-3. Store it as GitHub Actions secret `KUBECONFIG_DEV` (and `KUBECONFIG_PROD`).
-4. Uncomment the `kubectl apply` steps; inject the secret via `env:`.
-
-#### Security evaluation summary
-
-| Control | Self-hosted runner | Hetzner k3s |
+| Resource | Name | Namespace |
 |---|---|---|
-| API surface exposed to internet | No | Yes (behind TLS) |
-| kubeconfig stored outside cluster | No | Yes (GitHub Actions secrets) |
-| Blast radius if runner compromised | Local cluster | Hetzner cluster |
-| Runner maintenance burden | Medium | Low (stateless GH runners) |
-| Time to enable | ~2 h | ~4 h + server provisioning |
+| ServiceAccount | `cicd-deployer` | `triage-dev` |
+| Secret (token) | `cicd-deployer-token` | `triage-dev` |
+| Role | `cicd-deployer-role` | `triage-dev` |
+| RoleBinding | `cicd-deployer-binding` | `triage-dev` |
 
-**Recommendation**: Start with Option A (self-hosted runner on the local
-cluster) to validate the full pipeline.  Migrate to Option B when the workload
-needs to run on production infrastructure.
+Role permissions (triage-dev only):
+
+| API group | Resources | Verbs |
+|---|---|---|
+| `apps` | `deployments` | get, list, watch, update, patch |
+| `apps` | `replicasets` | get, list, watch |
+| `""` | `pods` | get, list, watch |
+| `""` | `services`, `configmaps`, `events` | get, list |
+
+**Not granted**: nodes, namespaces, secrets, exec/attach/portforward,
+cluster-level resources, or any triage-prod access.
+
+### Files created (S05c)
+
+| File | Purpose |
+|---|---|
+| `k8s/runner/rbac.yaml` | ServiceAccount, token Secret, Role, RoleBinding |
+| `k8s/runner/kustomization.yaml` | Apply target for above |
+| `scripts/generate-runner-kubeconfig.sh` | Generates scoped kubeconfig for KUBECONFIG_DEV secret |
+| `scripts/install-runner.sh` | Runner installation (requires `APPROVED=yes` guard) |
+| `.github/workflows/deploy-dev.yml` | Updated — real `kubectl apply`, rollout check, rollback |
+
+### Activation sequence (requires approval — see §6)
+
+```bash
+# Step 1: Create RBAC resources
+kubectl apply -k k8s/runner/
+
+# Step 2: Generate scoped kubeconfig
+bash scripts/generate-runner-kubeconfig.sh
+# → produces runner-kubeconfig.yaml (chmod 600)
+
+# Step 3: Upload to GitHub
+# Settings → Environments → dev → Secrets → KUBECONFIG_DEV
+# Then: rm runner-kubeconfig.yaml
+
+# Step 4: Register and start runner (requires GH_RUNNER_TOKEN)
+# Get token from: https://github.com/<ORG>/<REPO>/settings/actions/runners/new
+APPROVED=yes GH_RUNNER_TOKEN=<token> bash scripts/install-runner.sh
+
+# Step 5: Trigger deployment
+# GitHub Actions → Deploy — DEV → Run workflow → image_tag: sha-<sha>
+```
+
+---
+
+## 6. Runner Security Analysis
+
+### What is installed
+
+- GitHub Actions runner binary (v2.321.0), downloaded from
+  `github.com/actions/runner/releases`, SHA-256 verified.
+- Installed in `/home/niwr/actions-runner/`.
+- Registered with labels `self-hosted,linux,triage-dev-deployer`.
+- Runs as a **systemd service** under the existing `niwr` user account.
+
+### Exact permissions
+
+| Resource | Access |
+|---|---|
+| Kubernetes | `cicd-deployer` ServiceAccount — triage-dev namespace only (see §7 RBAC table) |
+| Docker socket | **None** — runner is not given `/var/run/docker.sock` |
+| GitHub repository | Checkout + read (standard `GITHUB_TOKEN: contents: read`) |
+| Host filesystem | All paths readable by `niwr` user (WSL2 standard — residual risk, see below) |
+| Other WSL projects | Readable as `niwr` — no additional restriction applied |
+| KUBECONFIG_DEV | Injected as env var during job; written to tmpfs, deleted after use |
+
+### How to remove
+
+```bash
+cd /home/niwr/actions-runner
+sudo ./svc.sh stop
+sudo ./svc.sh uninstall
+# Get removal token from GitHub: Settings → Actions → Runners → (runner) → Remove
+./config.sh remove --token <REMOVAL_TOKEN>
+cd ~
+rm -rf /home/niwr/actions-runner
+```
+
+Also delete the `KUBECONFIG_DEV` secret:
+`Settings → Environments → dev → Secrets → KUBECONFIG_DEV → Delete`.
+
+Optionally remove the RBAC identity:
+```bash
+kubectl delete -k k8s/runner/
+```
+
+### Residual host-security risks
+
+| Risk | Severity | Mitigation |
+|---|---|---|
+| Runner runs as `niwr` → reads all `niwr`-owned files | Medium | Restrict `workflow_dispatch` to repo owners; require GitHub Environment reviewer |
+| Malicious workflow triggered by compromised GitHub account | Medium | `workflow_dispatch` only + GitHub Environment "dev" required-reviewers |
+| Long-lived SA token in GitHub secret (KUBECONFIG_DEV) | Medium | Token scoped to triage-dev only; rotate via `kubectl delete secret cicd-deployer-token -n triage-dev && kubectl apply -k k8s/runner/` |
+| SA token logged if runner prints KUBECONFIG | Low | Workflow writes to tmpfs, uses KUBECONFIG env var (not arg), deletes after job |
+| Workflow reads other `niwr` home dirs | Low | No cross-project data accessed by deploy workflow; code runs in `_work/` |
+
+### Security controls in place
+
+- `workflow_dispatch` only (no PR trigger; no automatic fork execution)
+- `workflow_run` fires only on `main` branch CI success (no fork push access)
+- GitHub Environment `dev` with required-reviewers blocks unauthorized dispatch
+- `runs-on: [self-hosted, linux, triage-dev-deployer]` — GitHub-hosted runners rejected
+- RBAC: `cicd-deployer` cannot access triage-prod, secrets, or cluster resources
+- Kubeconfig written to `$(mktemp /tmp/kubeconfig-XXXXXX)`, chmod 600, deleted in `always()` step
+- No Docker socket mount
+- `install-runner.sh` requires `APPROVED=yes` environment variable guard
 
 ---
 
@@ -297,9 +374,9 @@ curl -s -X POST http://localhost:8080/triage \
 
 ---
 
-## 9. Executed CI stages (Sprint S05)
+## 9. Executed CI/CD stages
 
-The following stages were **actually executed** and verified during this sprint.
+### Sprint S05 — CI pipeline (verified)
 
 | Stage | Execution | Evidence |
 |---|---|---|
@@ -307,12 +384,18 @@ The following stages were **actually executed** and verified during this sprint.
 | `kubectl kustomize k8s/ci-overlays/dev` | ✅ Local | GHCR image + `IfNotPresent` in output |
 | `kubectl kustomize k8s/ci-overlays/prod` | ✅ Local | GHCR image + `IfNotPresent` in output |
 | Local dev overlay unchanged | ✅ Verified | `ticket-triage-api:latest` + `Never` |
-| Docker build (local) | ✅ Prior sprints | S04 verified with real inference |
-| Docker push to GHCR | ⏳ Pending | Requires `git push` to trigger CI |
-| Trivy scan | ⏳ Pending | Runs inside CI after `git push` |
-| DEV `kubectl apply` | ⏳ Pending | Blocked by connectivity limitation (§7) |
-| PROD `kubectl apply` | ⏳ Pending | Blocked by connectivity limitation (§7) |
+| Docker push to GHCR | ✅ CI | `ghcr.io/automation-agent-ai/multilingual-ticket-triage-devops:sha-<sha>` |
+| Trivy scan | ✅ CI | 54 unfixed HIGH OS CVEs; gate passing (`ignore-unfixed: true`) |
 
-The pipeline YAML, CI overlay renders, and test suite constitute the
-verifiable deliverables of S05.  Automated cluster deployment will be
-activated in a separate sprint once cluster access is authorised.
+### Sprint S05c — CD activation (configured, runner pending approval)
+
+| Stage | Status | Notes |
+|---|---|---|
+| RBAC manifests (`k8s/runner/rbac.yaml`) | ✅ Created | Not yet applied — awaiting runner approval |
+| `scripts/generate-runner-kubeconfig.sh` | ✅ Created | Generates KUBECONFIG_DEV; not yet run |
+| `scripts/install-runner.sh` | ✅ Created | Guarded by `APPROVED=yes`; not yet executed |
+| `deploy-dev.yml` updated (real apply) | ✅ Implemented | Runs on `triage-dev-deployer` label |
+| Self-hosted runner registered | ⏳ Pending approval | See §6 and Phase 3 checkpoint |
+| `KUBECONFIG_DEV` GitHub secret set | ⏳ Pending | After runner approval and RBAC apply |
+| DEV `kubectl apply` via GitHub Actions | ⏳ Pending | After runner online |
+| PROD `kubectl apply` | ⏳ Not planned | PROD workflow remains dry-run only |

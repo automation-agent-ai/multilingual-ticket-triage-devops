@@ -71,3 +71,7 @@ crash.*.log
 !terraform/terraform.tfvars.example
 
 backups/
+
+# Generated runner kubeconfig — contains a bearer token, never commit
+runner-kubeconfig.yaml
+*-kubeconfig.yaml

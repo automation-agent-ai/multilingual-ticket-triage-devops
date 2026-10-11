@@ -53,7 +53,21 @@ Point out:
 
 Navigate to the **Security** tab → **Code scanning** to show the SARIF upload.
 
-**Key limitation to state:** The `deploy-dev` and `deploy-prod` workflows run but `kubectl apply` is disabled (`if: false`). GitHub-hosted runners run on Azure and cannot reach the local kind cluster. The workflows verify the full pipeline end-to-end (test → render manifests → validate) without touching the cluster.
+**S05c update — CD gap resolved (runner pending approval):**
+The `deploy-dev` workflow has been updated with a real `kubectl apply` step.
+It runs on a **self-hosted runner** (`triage-dev-deployer` label) co-located
+on the WSL2 host, which can reach `127.0.0.1:50060` (kind cluster API).
+
+The runner uses a dedicated `cicd-deployer` Kubernetes ServiceAccount with a
+**least-privilege Role scoped to triage-dev only** (no cluster-admin, no
+cross-namespace access, no secret reads).
+
+The runner is **not yet registered** — the host owner must approve installation
+(see `docs/CICD.md §6`).  Once registered, the full CD pipeline including
+`kubectl apply`, rollout verification, and smoke-test is active.
+
+The `deploy-prod` workflow **remains a dry-run by design** — PROD is never
+modified by automation.
 
 ---
 

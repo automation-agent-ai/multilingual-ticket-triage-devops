@@ -63,8 +63,8 @@ verification command, current status, and any remaining limitation.
 | CI: SARIF upload to GitHub Security tab | `.github/workflows/ci.yml` lines 208–214 | `.github/workflows/ci.yml` | GitHub repo → Security → Code scanning | ✅ Verified (CI) | — |
 | CI: GHCR push (gated on Trivy pass, main only) | `.github/workflows/ci.yml` lines 220–233 | `.github/workflows/ci.yml` | `docker pull ghcr.io/automation-agent-ai/multilingual-ticket-triage-devops:latest` | ✅ Verified (CI) | — |
 | CI: minimum permissions (`contents: read` default) | `.github/workflows/ci.yml` lines 29–31 | `docs/SECURITY.md §2 Control 5` | `cat .github/workflows/ci.yml \| grep -A2 'permissions'` | ✅ Implemented | — |
-| Deploy-DEV workflow (automatic after CI) | `.github/workflows/deploy-dev.yml` | `.github/workflows/deploy-dev.yml` | `kubectl kustomize k8s/ci-overlays/dev` (dry-run) | ✅ Dry-run verified | `kubectl apply` disabled — no network route from GitHub runner to local cluster |
-| Deploy-PROD workflow (manual + approval gate) | `.github/workflows/deploy-prod.yml` | `.github/workflows/deploy-prod.yml` | GitHub Actions UI → Deploy PROD → Run workflow | ✅ Dry-run verified | `kubectl apply` disabled — same reason; production environment approval gate configured |
+| Deploy-DEV workflow (real apply — self-hosted runner) | `.github/workflows/deploy-dev.yml` | `k8s/runner/rbac.yaml`, `scripts/install-runner.sh` | GitHub Actions → Deploy DEV → Run workflow | ✅ Implemented (runner pending approval) | Self-hosted runner not yet registered — see docs/CICD.md §6 |
+| Deploy-PROD workflow (manual + approval gate) | `.github/workflows/deploy-prod.yml` | `.github/workflows/deploy-prod.yml` | GitHub Actions UI → Deploy PROD → Run workflow | ✅ Dry-run verified | PROD remains dry-run by design; cluster unchanged |
 | Immutable image tag `sha-<40-char-sha>` | `.github/workflows/ci.yml` lines 130–141 | `.github/workflows/ci.yml` | `docker pull ghcr.io/…:sha-<sha>` | ✅ Verified (CI) | — |
 
 ---
@@ -137,10 +137,12 @@ verification command, current status, and any remaining limitation.
 | S08 | Security audit (5 controls verified) | ✅ Complete |
 | S09 | Disaster recovery (backup + restore + rollback) | ✅ Complete |
 | S10 | Final documentation | ✅ This document |
+| S05c | CD activation (self-hosted runner + RBAC) | ✅ Configured — runner pending approval |
 
 ### Remaining gaps (documented, not blocking)
 
-- `kubectl apply` disabled in deploy workflows (no network route from GH runner to local cluster)
+- Self-hosted runner not yet registered — awaiting explicit approval (see docs/CICD.md §6)
+- DEV `kubectl apply` via GitHub Actions pending runner registration
 - PROD image lacks `/metrics` — PROD not monitored
 - `s07-metrics` image local only — not in GHCR
 - No Alertmanager / notification routing
