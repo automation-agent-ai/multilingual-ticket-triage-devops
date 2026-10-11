@@ -183,6 +183,14 @@ jobs:
       # ignore-unfixed → skip CVEs where no patched version is available yet
       #                  (avoids false-positive failures on unresolvable OS CVEs)
       # Output is SARIF for upload to the GitHub Security tab.
+      #
+      # limit-severities-for-sarif: true — required fix: entrypoint.sh in
+      #   trivy-action@v0.36.0 unsets TRIVY_SEVERITY when building the SARIF
+      #   report unless this flag is explicitly set, causing it to scan ALL
+      #   severities and report findings that ignore-unfixed/severity filters
+      #   would otherwise suppress ("Building SARIF report with all severities").
+      # scanners: vuln — matches the diagnostic table step; restricts the scan
+      #   to vulnerability data only, excluding secret/config scanners.
       - name: Trivy — vulnerability scan
         id: trivy
         uses: aquasecurity/trivy-action@v0.36.0
@@ -190,9 +198,11 @@ jobs:
           image-ref: ticket-triage-api:ci-scan
           format: sarif
           output: trivy-results.sarif
+          scanners: vuln
           severity: CRITICAL,HIGH
           exit-code: "1"
           ignore-unfixed: true
+          limit-severities-for-sarif: true
 
       # Upload results to GitHub Security > Code scanning (always, even on fail).
       - name: Upload Trivy SARIF to GitHub Security
