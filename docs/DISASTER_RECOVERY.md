@@ -407,29 +407,39 @@ to eliminate local-state single-point-of-failure.
 
 | Component | Risk | Notes |
 |---|---|---|
-| Prometheus TSDB (`prometheus-data` PVC) | **Data loss on cluster reset** | Live TSDB cannot be safely copied without a `POST /-/snapshot` API call |
+| Prometheus TSDB (`prometheus-data` PVC) | **Data loss on cluster reset** | Live TSDB cannot be safely copied; snapshot API (`POST /api/v1/admin/tsdb/snapshot`) requires `--web.enable-admin-api` (not currently enabled) |
 | Grafana SQLite (`grafana-data` PVC) | Dashboard state loss on cluster reset | Dashboard JSON **is** version-controlled in `k8s/` |
 | Prometheus configuration | Low — managed by k8s manifests | Recoverable from `k8s/` |
 
 ### Prometheus snapshot procedure (if safe monitoring backup is needed)
 
+> **⚠ Correction:** The Prometheus administrative snapshot API requires
+> `--web.enable-admin-api`, **not** `--web.enable-lifecycle`.
+> These are two separate flags:
+> - `--web.enable-lifecycle` (currently enabled) — enables `POST /-/reload` and `POST /-/quit`
+> - `--web.enable-admin-api` (**not** currently enabled) — enables the admin API including
+>   `POST /api/v1/admin/tsdb/snapshot`
+
+To enable Prometheus TSDB snapshots, add `--web.enable-admin-api` to
+`monitoring/prometheus/deployment.yaml` and re-apply, then use:
+
 ```bash
-# Trigger Prometheus snapshot via API (requires --web.enable-lifecycle flag)
+# Trigger Prometheus TSDB snapshot (requires --web.enable-admin-api)
 kubectl --context docker-desktop exec -n triage-monitoring \
   $(kubectl --context docker-desktop get pod -n triage-monitoring \
-    -l app=prometheus -o jsonpath='{.items[0].metadata.name}') \
+    -l app.kubernetes.io/name=prometheus -o jsonpath='{.items[0].metadata.name}') \
   -- wget -q -O- --post-data='' \
-  'http://localhost:9090/-/snapshot'
+  'http://localhost:9090/api/v1/admin/tsdb/snapshot'
 
 # Copy snapshot out of the PVC
-kubectl --context docker-desktop cp triage-monitoring/<pod>:/prometheus/snapshots \
+kubectl --context docker-desktop cp triage-monitoring/<pod-name>:/prometheus/snapshots \
   backups/<TIMESTAMP>/prometheus-snapshots/
 ```
 
-> This was documented as a **limitation** for Sprint S09 because:
-> 1. The Prometheus container does not currently have `--web.enable-lifecycle` enabled.
-> 2. Direct TSDB file copy would be unsafe without quiescing writes.
-> Adding lifecycle flag to the Prometheus deployment is a deferred improvement.
+> This is documented as a **limitation** for Sprint S09:
+> 1. `--web.enable-admin-api` is not currently enabled in the Prometheus deployment.
+> 2. Direct TSDB file copy would be unsafe without quiescing writes first.
+> Adding the admin API flag to the Prometheus deployment is a deferred improvement.
 
 ### Grafana dashboard recovery
 
