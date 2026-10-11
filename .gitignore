@@ -70,3 +70,4 @@ crash.*.log
 *.tfvars
 !terraform/terraform.tfvars.example
 
+backups/
