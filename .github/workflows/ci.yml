@@ -71,11 +71,15 @@ jobs:
       - name: Install CPU-only PyTorch
         run: |
           pip install --upgrade pip
-          pip install "torch==2.3.1+cpu" \
+          pip install "torch==2.10.0+cpu" \
             --index-url https://download.pytorch.org/whl/cpu
 
       - name: Install project runtime dependencies
-        run: pip install -r requirements-docker.txt
+        # Pass --extra-index-url so pip can find torch==2.10.0+cpu (pinned in
+        # requirements-docker.txt) when resolving the full dependency tree.
+        run: |
+          pip install -r requirements-docker.txt \
+            --extra-index-url https://download.pytorch.org/whl/cpu
 
       # pytest and httpx (needed by FastAPI TestClient) are not in
       # requirements-docker.txt because they are test-only dependencies.
