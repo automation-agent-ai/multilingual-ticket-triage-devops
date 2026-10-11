@@ -2,30 +2,38 @@
 # Deploy — DEV
 #
 # Deploys a GHCR image to the triage-dev Kubernetes namespace.
-# Triggered automatically when the CI workflow completes successfully on main,
-# or manually via workflow_dispatch with an explicit image tag.
 #
-# ⚠️  CONNECTIVITY LIMITATION — READ BEFORE ENABLING
-# ────────────────────────────────────────────────────
-# GitHub-hosted runners (ubuntu-latest) execute on Azure infrastructure.
-# They have no network route to the local Docker Desktop kind cluster
-# running on the developer workstation.
+# Triggers:
+#   • workflow_dispatch — explicit manual trigger (preferred; operator chooses tag)
+#   • workflow_run      — automatic after CI completes successfully on main
+#                         (runs only on the self-hosted runner; no fork exposure)
 #
-# This workflow is therefore designed as a VALIDATED DRY-RUN:
-#   • Image reference and kustomization edits are applied in the workflow
-#     workspace (never committed).
-#   • `kubectl kustomize` renders and validates the final manifests.
-#   • The actual `kubectl apply` step is disabled (if: false).
+# Runner:
+#   Requires a self-hosted runner labeled  triage-dev-deployer  co-located with
+#   the kind cluster.  GitHub-hosted runners (ubuntu-latest) cannot reach the
+#   local cluster at 127.0.0.1.
 #
-# To enable live deployment, choose one of:
-#   Option A — Self-hosted runner:
-#     Register a runner inside the cluster network.
-#     Set runs-on to the runner label.  Uncomment the apply step.
-#   Option B — Remote cluster (Hetzner k3s, recommended for production):
-#     Add KUBECONFIG_DEV secret (scoped kubeconfig for triage-dev namespace).
-#     Uncomment the apply step.  Evaluate Option B alongside security review.
+#   Setup:
+#     1. kubectl apply -k k8s/runner/          # create RBAC identity
+#     2. bash scripts/generate-runner-kubeconfig.sh  # produce KUBECONFIG_DEV
+#     3. Upload KUBECONFIG_DEV to GitHub: Settings → Environments → dev → Secrets
+#     4. APPROVED=yes GH_RUNNER_TOKEN=<token> bash scripts/install-runner.sh
+#     5. Re-run this workflow.
 #
-# See docs/CICD.md §5 for deployment options analysis.
+# Security model:
+#   • Only the manual trigger (workflow_dispatch) and trusted-main automatic
+#     trigger (workflow_run after CI on main) are accepted.
+#   • PRs and fork pushes NEVER reach this workflow.
+#   • KUBECONFIG_DEV grants the cicd-deployer ServiceAccount access to the
+#     triage-dev namespace only (Role: cicd-deployer-role).  The token has
+#     no cluster-admin or cross-namespace access.
+#   • The kubeconfig is written to a tmpfs path, used, then explicitly deleted.
+#   • On rollout failure the workflow runs `kubectl rollout undo` before exit.
+#   • GitHub Environment "dev" — add required-reviewers in
+#     Settings → Environments → dev for an additional approval gate.
+#
+# Image naming (from ci.yml):
+#   ghcr.io/automation-agent-ai/multilingual-ticket-triage-devops:sha-<40-char-sha>
 # ──────────────────────────────────────────────────────────────────────────────
 
 name: Deploy — DEV
@@ -41,7 +49,10 @@ on:
   workflow_dispatch:
     inputs:
       image_tag:
-        description: "GHCR image tag (e.g. sha-abc123…40chars or latest)"
+        description: >
+          GHCR image tag to deploy.
+          Format: sha-<40-hex-chars>  (immutable, preferred)
+          or: latest  (mutable, use with caution)
         required: true
         default: "latest"
 
@@ -51,30 +62,37 @@ permissions:
 jobs:
   deploy-dev:
     name: Deploy to triage-dev
-    runs-on: ubuntu-latest
+    # ── Self-hosted runner requirement ─────────────────────────────────────
+    # Label 'triage-dev-deployer' is assigned during runner registration.
+    # If no self-hosted runner is registered, the job is queued but will not
+    # run (it does NOT fall back to a GitHub-hosted runner).
+    runs-on: [self-hosted, linux, triage-dev-deployer]
 
     # Only proceed when triggered by a successful CI run.
-    # workflow_dispatch bypasses this condition (manual invocations are explicit).
+    # workflow_dispatch bypasses this condition (explicit operator intent).
     if: >-
       github.event_name == 'workflow_dispatch'
       || github.event.workflow_run.conclusion == 'success'
 
-    # GitHub Environment "dev" — optionally add required-reviewers or
-    # deployment wait timers in: Settings → Environments → dev.
+    # GitHub Environment "dev" — add required-reviewers for an extra gate.
     environment: dev
 
     env:
       REGISTRY: ghcr.io
       IMAGE_NAME: automation-agent-ai/multilingual-ticket-triage-devops
       NAMESPACE: triage-dev
+      # Deterministic kubeconfig path — derived from run context so it is known
+      # at template-evaluation time and accessible by ALL steps without relying
+      # on step outputs.  Using a fixed path (not mktemp) eliminates the attack
+      # surface where steps.kubeconfig.outputs.path evaluates to "" (empty) when
+      # the write step fails, which would cause kubectl to fall back to the host
+      # ~/.kube/config (docker-desktop cluster-admin) and bypass scoped RBAC.
+      KUBECONFIG: /tmp/kubeconfig-${{ github.run_id }}-${{ github.run_attempt }}
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      # ── Resolve image tag ─────────────────────────────────────────────────
+      # ── Resolve image tag ───────────────────────────────────────────────
       # workflow_run events carry the SHA of the triggering commit.
-      # workflow_dispatch inputs carry an explicit tag supplied by the operator.
+      # workflow_dispatch inputs carry an explicit tag from the operator.
       - name: Resolve image tag
         id: tag
         run: |
@@ -86,6 +104,21 @@ jobs:
           echo "value=$TAG" >> "$GITHUB_OUTPUT"
           echo "Resolved tag: $TAG"
 
+      # ── Validate image tag format ────────────────────────────────────────
+      # Enforce sha-<40-hex> for immutable deployments.
+      # 'latest' is permitted via workflow_dispatch with a warning.
+      - name: Validate image tag
+        run: |
+          TAG="${{ steps.tag.outputs.value }}"
+          if [[ "$TAG" =~ ^sha-[0-9a-f]{40}$ ]]; then
+            echo "✅ Immutable SHA tag confirmed: $TAG"
+          elif [ "$TAG" = "latest" ]; then
+            echo "::warning::Deploying 'latest' tag — not immutable. Prefer sha-<sha> for traceability."
+          else
+            echo "::error::Unrecognised tag format: '$TAG'. Use sha-<40-hex-chars> or latest."
+            exit 1
+          fi
+
       - name: Resolve full image reference
         id: image
         run: |
@@ -93,25 +126,31 @@ jobs:
           echo "ref=$REF" >> "$GITHUB_OUTPUT"
           echo "Image: $REF"
 
-      # ── Install CLI tools ─────────────────────────────────────────────────
-      - name: Set up kubectl
-        uses: azure/setup-kubectl@v4
-        with:
-          version: "v1.32.0"
+      # ── Checkout ────────────────────────────────────────────────────────
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-      # kustomize standalone is required for `kustomize edit set image`.
+      # ── kustomize ───────────────────────────────────────────────────────
+      # kustomize standalone needed for `kustomize edit set image`.
       # kubectl bundles `kubectl kustomize` (build only) but not `edit`.
       - name: Set up kustomize
         run: |
-          KUSTOMIZE_VERSION="v5.4.3"
-          curl -sL \
-            "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2F${KUSTOMIZE_VERSION}/kustomize_${KUSTOMIZE_VERSION}_linux_amd64.tar.gz" \
-            | tar -xz -C /usr/local/bin/
-          kustomize version
+          if command -v kustomize &>/dev/null; then
+            echo "kustomize already available: $(kustomize version)"
+          else
+            KUSTOMIZE_VERSION="v5.4.3"
+            # Install to user-writable directory (runner runs as non-root niwr user)
+            mkdir -p "$HOME/.local/bin"
+            curl -sL \
+              "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2F${KUSTOMIZE_VERSION}/kustomize_${KUSTOMIZE_VERSION}_linux_amd64.tar.gz" \
+              | tar -xz -C "$HOME/.local/bin/"
+            export PATH="$HOME/.local/bin:$PATH"
+            kustomize version
+          fi
+          # Ensure ~/.local/bin is on PATH for all subsequent steps
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
-      # ── Patch kustomization (workspace only — NOT committed) ──────────────
-      # Sets both newName (GHCR registry path) and newTag (immutable SHA).
-      # Equivalent to hand-editing the images: block in kustomization.yaml.
+      # ── Patch kustomization (workspace only — NOT committed) ─────────────
       - name: Set registry image reference in kustomization
         run: |
           cd k8s/ci-overlays/dev
@@ -120,65 +159,191 @@ jobs:
           echo "Updated k8s/ci-overlays/dev/kustomization.yaml:"
           grep -A4 "^images:" kustomization.yaml
 
-      # ── Render and validate manifests ─────────────────────────────────────
-      # Uses the CI overlay which extends the dev overlay and changes
-      # imagePullPolicy from Never (local kind) to IfNotPresent (registry pull).
-      - name: Render CI manifests (dry-run validation)
+      # ── Render manifests (validation) ────────────────────────────────────
+      - name: Render CI manifests
         run: |
           echo "========================================================"
           echo "  Final manifests — triage-dev (CI registry deployment)  "
           echo "========================================================"
           kubectl kustomize k8s/ci-overlays/dev
 
-      # ── ACTUAL DEPLOYMENT — DISABLED ─────────────────────────────────────
-      # Uncomment when a kubeconfig secret or self-hosted runner is available.
+      # ── Write scoped kubeconfig ──────────────────────────────────────────
+      # KUBECONFIG_DEV is stored as a GitHub Environment secret.
+      # Content: scoped kubeconfig for cicd-deployer ServiceAccount (triage-dev).
       #
-      # - name: Apply to DEV cluster
-      #   env:
-      #     KUBECONFIG_DATA: ${{ secrets.KUBECONFIG_DEV }}
-      #   run: |
-      #     echo "$KUBECONFIG_DATA" > /tmp/kubeconfig
-      #     chmod 600 /tmp/kubeconfig
-      #     export KUBECONFIG=/tmp/kubeconfig
-      #     kubectl apply -k k8s/ci-overlays/dev
-      #     kubectl rollout status deployment/ticket-triage \
-      #       -n "${{ env.NAMESPACE }}" --timeout=300s
-      #     rm -f /tmp/kubeconfig
-      # ─────────────────────────────────────────────────────────────────────
-
-      # ── Job summary ───────────────────────────────────────────────────────
-      - name: Write job summary
+      # Security design:
+      #   • Target path is the job-level KUBECONFIG env var (fixed, deterministic).
+      #     All cluster steps inherit it automatically — no step output involved.
+      #     This eliminates the race where steps.kubeconfig.outputs.path evaluates
+      #     to "" on step failure and kubectl falls back to ~/.kube/config
+      #     (docker-desktop cluster-admin), bypassing the scoped cicd-deployer RBAC.
+      #   • File is chmod 600 (owner-only read/write).
+      #   • Verified non-empty before succeeding (catches missing/empty secret).
+      #   • Deleted in the always() cleanup step below.
+      - name: Write scoped kubeconfig
+        id: kubeconfig
+        env:
+          KUBECONFIG_DATA: ${{ secrets.KUBECONFIG_DEV }}
         run: |
+          # KUBECONFIG path is set by the job-level env block (fixed, deterministic).
+          echo "$KUBECONFIG_DATA" > "$KUBECONFIG"
+          chmod 600 "$KUBECONFIG"
+          # Abort early if the secret was empty or missing — do not proceed with
+          # an empty KUBECONFIG file that would cause kubectl to fall back to
+          # the host admin config.
+          if [ ! -s "$KUBECONFIG" ]; then
+            echo "::error::KUBECONFIG_DEV secret is empty or missing. Aborting."
+            rm -f "$KUBECONFIG"
+            exit 1
+          fi
+          echo "Scoped kubeconfig written to: $KUBECONFIG (permissions 600)"
+
+      # ── Apply to DEV cluster ─────────────────────────────────────────────
+      # The ci-overlay includes a Namespace resource (already exists in cluster).
+      # The cicd-deployer SA cannot GET cluster-scoped Namespace resources
+      # (by design — no cluster-level permissions).  We render the manifests
+      # and strip Namespace docs before applying (the namespace already exists).
+      - name: Apply to triage-dev cluster
+        id: apply
+        run: |
+          # Guard: abort loudly if the scoped kubeconfig file is absent.
+          # An empty KUBECONFIG would cause kubectl to fall back to the host
+          # ~/.kube/config (cluster-admin), bypassing cicd-deployer RBAC.
+          if [ ! -f "${KUBECONFIG}" ]; then
+            echo "::error::Scoped kubeconfig not found at '${KUBECONFIG}'. Aborting to prevent admin credential fallback."
+            exit 1
+          fi
+          # Render manifests and strip the Namespace document.
+          # The cicd-deployer SA has no GET on cluster-scoped Namespace resources.
+          # The triage-dev namespace already exists; no need to manage it via CD.
+          # Python one-liner keeps the YAML literal block valid (no unindented lines).
+          kubectl kustomize k8s/ci-overlays/dev \
+            | python3 -c "import sys,re; docs=sys.stdin.read().split('\n---\n'); filtered=[d for d in docs if not re.search(r'^kind:\s*Namespace',d,re.M)]; print('\n---\n'.join(filtered))" \
+            > /tmp/deploy-dev-manifests.yaml
+
+          echo "Applying to namespace: ${{ env.NAMESPACE }}"
+          kubectl apply -f /tmp/deploy-dev-manifests.yaml
+          rm -f /tmp/deploy-dev-manifests.yaml
+
+      # ── Rollout verification ─────────────────────────────────────────────
+      - name: Wait for rollout to complete
+        id: rollout
+        run: |
+          if [ ! -f "${KUBECONFIG}" ]; then
+            echo "::error::Scoped kubeconfig not found at '${KUBECONFIG}'. Aborting."
+            exit 1
+          fi
+          echo "Waiting for deployment/ticket-triage rollout (timeout: 300s)"
+          kubectl rollout status deployment/ticket-triage \
+            --namespace "${{ env.NAMESPACE }}" \
+            --timeout=300s
+
+      # ── Smoke test — health endpoints ────────────────────────────────────
+      - name: Verify readiness via kubectl exec probe
+        run: |
+          if [ ! -f "${KUBECONFIG}" ]; then
+            echo "::error::Scoped kubeconfig not found at '${KUBECONFIG}'. Aborting."
+            exit 1
+          fi
+          POD=$(kubectl get pod \
+            -n "${{ env.NAMESPACE }}" \
+            -l app=ticket-triage \
+            -o jsonpath='{.items[0].metadata.name}')
+          echo "Target pod: $POD"
+
+          echo "--- GET /health ---"
+          kubectl exec "$POD" -n "${{ env.NAMESPACE }}" \
+            -- curl -sf http://localhost:8000/health
+
+          echo "--- GET /ready ---"
+          kubectl exec "$POD" -n "${{ env.NAMESPACE }}" \
+            -- curl -sf http://localhost:8000/ready
+
+          echo "--- GET /metrics (first 10 lines) ---"
+          kubectl exec "$POD" -n "${{ env.NAMESPACE }}" \
+            -- curl -sf http://localhost:8000/metrics | head -10
+
+      # ── Verify image provenance ──────────────────────────────────────────
+      - name: Confirm image reference on running pod
+        run: |
+          if [ ! -f "${KUBECONFIG}" ]; then
+            echo "::error::Scoped kubeconfig not found at '${KUBECONFIG}'. Aborting."
+            exit 1
+          fi
+          ACTUAL=$(kubectl get pod \
+            -n "${{ env.NAMESPACE }}" \
+            -l app=ticket-triage \
+            -o jsonpath='{.items[0].spec.containers[0].image}')
+          EXPECTED="${{ steps.image.outputs.ref }}"
+          echo "Expected: $EXPECTED"
+          echo "Actual:   $ACTUAL"
+          if [ "$ACTUAL" != "$EXPECTED" ]; then
+            echo "::error::Image mismatch — pod is running a different image than deployed."
+            exit 1
+          fi
+          echo "✅ Image provenance confirmed."
+
+      # ── Rollback on failure ──────────────────────────────────────────────
+      # Runs only if the apply succeeded but the rollout itself failed.
+      # Does NOT run for smoke-test step failures (exec/verify errors
+      # are post-deployment checks, not deployment failures).
+      - name: Rollback on failure
+        # kubeconfig.outcome == 'success' is required: without it this step could
+        # run under the failure() condition even when the kubeconfig was never
+        # written, causing kubectl to fall back to the host ~/.kube/config
+        # (cluster-admin) for the rollback — a security bypass.
+        if: >-
+          failure()
+          && steps.kubeconfig.outcome == 'success'
+          && steps.apply.outcome == 'success'
+          && steps.rollout.outcome == 'failure'
+        run: |
+          if [ ! -f "${KUBECONFIG}" ]; then
+            echo "::error::Scoped kubeconfig not found at '${KUBECONFIG}'. Aborting rollback to prevent admin credential fallback."
+            exit 1
+          fi
+          echo "::warning::Rollout failed — rolling back deployment/ticket-triage"
+          kubectl rollout undo deployment/ticket-triage \
+            --namespace "${{ env.NAMESPACE }}"
+          kubectl rollout status deployment/ticket-triage \
+            --namespace "${{ env.NAMESPACE }}" \
+            --timeout=120s
+          echo "Rollback complete."
+
+      # ── Kubeconfig cleanup (always) ──────────────────────────────────────
+      # Uses the job-level KUBECONFIG env var (fixed path), NOT step outputs.
+      # steps.kubeconfig.outputs.path evaluates to "" if the write step failed,
+      # making [ -f "" ] a silent no-op that leaks the file.  The fixed path
+      # is always known regardless of step outcome.
+      - name: Delete scoped kubeconfig
+        if: always()
+        run: |
+          if [ -f "${KUBECONFIG}" ]; then
+            rm -f "${KUBECONFIG}"
+            echo "Kubeconfig deleted: ${KUBECONFIG}"
+          else
+            echo "Kubeconfig not present at '${KUBECONFIG}' — nothing to delete."
+          fi
+
+      # ── Job summary ──────────────────────────────────────────────────────
+      - name: Write job summary
+        if: always()
+        run: |
+          RESULT="✅ Deployed"
+          if [ "${{ steps.rollout.outcome }}" != "success" ]; then
+            RESULT="❌ Failed (see rollback)"
+          fi
           {
-            echo "### DEV Deployment — Dry Run"
+            echo "### DEV Deployment — ${RESULT}"
             echo ""
             echo "| Field | Value |"
             echo "|---|---|"
             echo "| Image | \`${{ steps.image.outputs.ref }}\` |"
             echo "| Namespace | \`${{ env.NAMESPACE }}\` |"
             echo "| Kustomize overlay | \`k8s/ci-overlays/dev\` |"
-            echo "| Applied to cluster | ❌ Disabled — GitHub-hosted runner has no route to local cluster |"
-            echo ""
-            echo "**To deploy manually on your workstation:**"
-            echo "\`\`\`bash"
-            echo "# 1. Pull image from GHCR"
-            echo "docker pull ${{ steps.image.outputs.ref }}"
-            echo ""
-            echo "# 2. Stage into kind node (find node name with: kubectl get nodes)"
-            echo "KIND_NODE=\$(kubectl get nodes -o jsonpath='{.items[0].metadata.name}')"
-            echo "docker save ${{ steps.image.outputs.ref }} \\"
-            echo "  | docker exec -i \"\$KIND_NODE\" ctr -n k8s.io images import -"
-            echo ""
-            echo "# 3. Apply manifests"
-            echo "cd k8s/overlays/dev"
-            echo "kustomize edit set image \\"
-            echo "  'ticket-triage-api=${{ steps.image.outputs.ref }}'"
-            echo "kubectl apply -k ."
-            echo "kubectl rollout status deployment/ticket-triage \\"
-            echo "  -n ${{ env.NAMESPACE }} --timeout=300s"
-            echo ""
-            echo "# 4. Smoke test"
-            echo "kubectl port-forward svc/ticket-triage 8080:8000 -n ${{ env.NAMESPACE }} &"
-            echo "curl -s http://localhost:8080/health"
-            echo "\`\`\`"
+            echo "| Runner | \`${{ runner.name }}\` |"
+            echo "| Triggered by | \`${{ github.actor }}\` |"
+            echo "| Commit | \`${{ github.sha }}\` |"
+            echo "| Apply outcome | ${{ steps.apply.outcome }} |"
+            echo "| Rollout outcome | ${{ steps.rollout.outcome }} |"
           } >> "$GITHUB_STEP_SUMMARY"

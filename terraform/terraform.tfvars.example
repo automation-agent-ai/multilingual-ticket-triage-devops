@@ -1,0 +1,9 @@
+# Copy this file to terraform.tfvars and adjust values if needed.
+# The defaults in variables.tf already match the docker-desktop environment.
+
+kubeconfig_path     = "~/.kube/config"
+kube_context        = "docker-desktop"
+monitoring_namespace = "triage-monitoring"
+storage_class_name  = "standard"
+prometheus_pvc_size = "1Gi"
+grafana_pvc_size    = "1Gi"

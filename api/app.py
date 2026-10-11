@@ -24,13 +24,24 @@ import asyncio
 import contextlib
 import logging
 import os
+import time
 import traceback
 from typing import Any
 
 import yaml
 from fastapi import FastAPI, HTTPException, Request, status
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 from pydantic import BaseModel, Field
+
+from api.prom_metrics import (
+    AGENT_READY,
+    CONTENT_TYPE_LATEST,
+    TRIAGE_DURATION_SECONDS,
+    TRIAGE_FAILURES_TOTAL,
+    TRIAGE_REQUESTS_TOTAL,
+    PrometheusMiddleware,
+    generate_latest,
+)
 
 from src.application.agent import TicketTriageAgent
 from src.application.preprocessing import (
@@ -117,6 +128,10 @@ app = FastAPI(
     version="1.0.0",
 )
 
+# Register Prometheus ASGI middleware — must be added after app creation.
+# /metrics requests are explicitly excluded from all HTTP counters.
+app.add_middleware(PrometheusMiddleware)
+
 
 # ─── Lifecycle Management ─────────────────────────────────────────────────────
 
@@ -144,11 +159,13 @@ async def startup_event() -> None:
     try:
         _agent = _initialize_agent()
         _agent_ready = True
+        AGENT_READY.set(1)
         logger.info("Agent initialized successfully")
     except Exception as exc:
         logger.error(f"Failed to initialize agent: {exc}")
         logger.error(traceback.format_exc())
         _agent_ready = False
+        AGENT_READY.set(0)
 
 
 @app.on_event("shutdown")
@@ -357,6 +374,23 @@ def _triage_result_to_response(result: TriageResult) -> TicketTriageResponse:
 # ─── HTTP Endpoints ───────────────────────────────────────────────────────────
 
 
+@app.get(
+    "/metrics",
+    tags=["Monitoring"],
+    include_in_schema=True,
+    summary="Prometheus metrics",
+    response_class=PlainTextResponse,
+)
+async def metrics() -> PlainTextResponse:
+    """
+    Expose Prometheus metrics in the text/plain exposition format.
+
+    Scraped by Prometheus every 30 s. This request is excluded from the HTTP
+    request counter so it does not skew throughput or latency statistics.
+    """
+    return PlainTextResponse(generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
+
 @app.get("/health", response_model=HealthResponse, tags=["Health"])
 async def health() -> HealthResponse:
     """
@@ -415,6 +449,8 @@ async def triage(req: TicketTriageRequest) -> TicketTriageResponse:
         )
 
     async with _inference_semaphore:
+        TRIAGE_REQUESTS_TOTAL.inc()
+        triage_start = time.perf_counter()
         try:
             # Build TicketInput with preprocessing
             ticket_input = _build_ticket_input(req)
@@ -433,11 +469,15 @@ async def triage(req: TicketTriageRequest) -> TicketTriageResponse:
             logger.error(f"Triage failed for ticket {req.ticket_id}: {exc}")
             logger.error(traceback.format_exc())
 
+            TRIAGE_FAILURES_TOTAL.inc()
+
             # Return 503 for inference backend errors (Ollama connection, timeout)
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="Inference backend unavailable. Please try again later.",
             )
+        finally:
+            TRIAGE_DURATION_SECONDS.observe(time.perf_counter() - triage_start)
 
 
 # ─── Exception Handlers ───────────────────────────────────────────────────────

@@ -50,6 +50,11 @@ lance-namespace-urllib3-client==0.13.0
 # pyarrow 20.0.0 → 23.0.1 (CVE-2026-25087  HIGH — use-after-free / DoS)
 pyarrow==23.0.1
 
+# ── Observability ─────────────────────────────────────────────────────────────
+# prometheus-client: exposes /metrics in Prometheus text exposition format.
+# Added Sprint S07 — lightweight, no heavy transitive deps.
+prometheus-client==0.21.1
+
 # ── FastAPI / HTTP server ─────────────────────────────────────────────────────
 fastapi==0.143.0
 uvicorn[standard]==0.54.0

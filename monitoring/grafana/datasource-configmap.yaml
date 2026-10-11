@@ -1,0 +1,22 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-datasources
+  namespace: triage-monitoring
+  labels:
+    app.kubernetes.io/component: grafana
+    app.kubernetes.io/managed-by: kustomize
+data:
+  prometheus.yaml: |
+    apiVersion: 1
+    datasources:
+      - name: Prometheus
+        type: prometheus
+        uid: triage-prometheus
+        url: http://prometheus.triage-monitoring.svc.cluster.local:9090
+        access: proxy
+        isDefault: true
+        editable: false
+        jsonData:
+          httpMethod: POST
+          timeInterval: 30s
