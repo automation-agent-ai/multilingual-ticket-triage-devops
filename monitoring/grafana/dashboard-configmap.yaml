@@ -1,0 +1,154 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboards
+  namespace: triage-monitoring
+  labels:
+    app.kubernetes.io/component: grafana
+    app.kubernetes.io/managed-by: kustomize
+data:
+  triage-overview.json: |
+    {
+      "uid": "triage-overview",
+      "title": "Ticket Triage — Overview",
+      "description": "HTTP and triage metrics for the Multilingual Ticket Triage API (DEV environment).",
+      "tags": ["ticket-triage", "s07"],
+      "schemaVersion": 38,
+      "version": 1,
+      "refresh": "30s",
+      "time": { "from": "now-1h", "to": "now" },
+      "timezone": "browser",
+      "editable": false,
+      "graphTooltip": 1,
+      "panels": [
+        {
+          "id": 1,
+          "type": "stat",
+          "title": "DEV Availability",
+          "description": "1 = target reachable by Prometheus; 0 = down.",
+          "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
+          "datasource": { "type": "prometheus", "uid": "triage-prometheus" },
+          "fieldConfig": {
+            "defaults": {
+              "mappings": [
+                { "type": "value", "options": { "0": { "text": "DOWN", "color": "red" }, "1": { "text": "UP", "color": "green" } } }
+              ],
+              "thresholds": { "mode": "absolute", "steps": [ { "color": "red", "value": null }, { "color": "green", "value": 1 } ] },
+              "unit": "short",
+              "color": { "mode": "thresholds" }
+            }
+          },
+          "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background", "graphMode": "none", "justifyMode": "center", "textMode": "auto" },
+          "targets": [{ "datasource": { "type": "prometheus", "uid": "triage-prometheus" }, "expr": "up{job=\"ticket-triage-dev\"}", "legendFormat": "DEV", "refId": "A" }]
+        },
+        {
+          "id": 2,
+          "type": "stat",
+          "title": "Agent Ready",
+          "description": "1 = triage agent initialized; 0 = agent startup failed.",
+          "gridPos": { "h": 4, "w": 6, "x": 6, "y": 0 },
+          "datasource": { "type": "prometheus", "uid": "triage-prometheus" },
+          "fieldConfig": {
+            "defaults": {
+              "mappings": [
+                { "type": "value", "options": { "0": { "text": "NOT READY", "color": "red" }, "1": { "text": "READY", "color": "green" } } }
+              ],
+              "thresholds": { "mode": "absolute", "steps": [ { "color": "red", "value": null }, { "color": "green", "value": 1 } ] },
+              "unit": "short",
+              "color": { "mode": "thresholds" }
+            }
+          },
+          "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background", "graphMode": "none", "justifyMode": "center", "textMode": "auto" },
+          "targets": [{ "datasource": { "type": "prometheus", "uid": "triage-prometheus" }, "expr": "agent_ready{job=\"ticket-triage-dev\"}", "legendFormat": "Agent", "refId": "A" }]
+        },
+        {
+          "id": 3,
+          "type": "stat",
+          "title": "Triage Requests (total)",
+          "gridPos": { "h": 4, "w": 6, "x": 12, "y": 0 },
+          "datasource": { "type": "prometheus", "uid": "triage-prometheus" },
+          "fieldConfig": { "defaults": { "unit": "short", "color": { "mode": "palette-classic" } } },
+          "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "area", "justifyMode": "auto", "textMode": "auto" },
+          "targets": [{ "datasource": { "type": "prometheus", "uid": "triage-prometheus" }, "expr": "triage_requests_total{job=\"ticket-triage-dev\"}", "legendFormat": "Total triage requests", "refId": "A" }]
+        },
+        {
+          "id": 4,
+          "type": "stat",
+          "title": "Triage Failures (total)",
+          "gridPos": { "h": 4, "w": 6, "x": 18, "y": 0 },
+          "datasource": { "type": "prometheus", "uid": "triage-prometheus" },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 1 } ] },
+              "color": { "mode": "thresholds" }
+            }
+          },
+          "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background", "graphMode": "none", "justifyMode": "auto", "textMode": "auto" },
+          "targets": [{ "datasource": { "type": "prometheus", "uid": "triage-prometheus" }, "expr": "triage_failures_total{job=\"ticket-triage-dev\"}", "legendFormat": "Failures", "refId": "A" }]
+        },
+        {
+          "id": 5,
+          "type": "timeseries",
+          "title": "HTTP Request Throughput (req/s)",
+          "description": "Per-route request rate over a 5-minute rolling window.",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
+          "datasource": { "type": "prometheus", "uid": "triage-prometheus" },
+          "fieldConfig": {
+            "defaults": { "unit": "reqps", "custom": { "lineWidth": 2, "fillOpacity": 10 } }
+          },
+          "options": { "tooltip": { "mode": "multi", "sort": "desc" }, "legend": { "displayMode": "list", "placement": "bottom" } },
+          "targets": [
+            { "datasource": { "type": "prometheus", "uid": "triage-prometheus" }, "expr": "rate(http_requests_total{job=\"ticket-triage-dev\"}[5m])", "legendFormat": "{{method}} {{route}} {{status_code}}", "refId": "A" }
+          ]
+        },
+        {
+          "id": 6,
+          "type": "timeseries",
+          "title": "HTTP 5xx Error Rate (req/s)",
+          "description": "Rate of 5xx responses over a 5-minute window.",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
+          "datasource": { "type": "prometheus", "uid": "triage-prometheus" },
+          "fieldConfig": {
+            "defaults": { "unit": "reqps", "color": { "fixedColor": "red", "mode": "fixed" }, "custom": { "lineWidth": 2, "fillOpacity": 20 } }
+          },
+          "options": { "tooltip": { "mode": "multi", "sort": "desc" }, "legend": { "displayMode": "list", "placement": "bottom" } },
+          "targets": [
+            { "datasource": { "type": "prometheus", "uid": "triage-prometheus" }, "expr": "rate(http_requests_total{job=\"ticket-triage-dev\",status_code=~\"5..\"}[5m])", "legendFormat": "5xx errors", "refId": "A" }
+          ]
+        },
+        {
+          "id": 7,
+          "type": "timeseries",
+          "title": "HTTP Request Latency — p50 / p95 / p99",
+          "description": "Percentile latency for /triage endpoint over 5-minute windows.",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 },
+          "datasource": { "type": "prometheus", "uid": "triage-prometheus" },
+          "fieldConfig": {
+            "defaults": { "unit": "s", "custom": { "lineWidth": 2, "fillOpacity": 5 } }
+          },
+          "options": { "tooltip": { "mode": "multi", "sort": "desc" }, "legend": { "displayMode": "list", "placement": "bottom" } },
+          "targets": [
+            { "datasource": { "type": "prometheus", "uid": "triage-prometheus" }, "expr": "histogram_quantile(0.50, rate(http_request_duration_seconds_bucket{job=\"ticket-triage-dev\",route=\"/triage\"}[5m]))", "legendFormat": "p50", "refId": "A" },
+            { "datasource": { "type": "prometheus", "uid": "triage-prometheus" }, "expr": "histogram_quantile(0.95, rate(http_request_duration_seconds_bucket{job=\"ticket-triage-dev\",route=\"/triage\"}[5m]))", "legendFormat": "p95", "refId": "B" },
+            { "datasource": { "type": "prometheus", "uid": "triage-prometheus" }, "expr": "histogram_quantile(0.99, rate(http_request_duration_seconds_bucket{job=\"ticket-triage-dev\",route=\"/triage\"}[5m]))", "legendFormat": "p99", "refId": "C" }
+          ]
+        },
+        {
+          "id": 8,
+          "type": "timeseries",
+          "title": "Triage Processing Duration — p50 / p95",
+          "description": "End-to-end triage pipeline duration including LLM inference.",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 12 },
+          "datasource": { "type": "prometheus", "uid": "triage-prometheus" },
+          "fieldConfig": {
+            "defaults": { "unit": "s", "custom": { "lineWidth": 2, "fillOpacity": 5 } }
+          },
+          "options": { "tooltip": { "mode": "multi", "sort": "desc" }, "legend": { "displayMode": "list", "placement": "bottom" } },
+          "targets": [
+            { "datasource": { "type": "prometheus", "uid": "triage-prometheus" }, "expr": "histogram_quantile(0.50, rate(triage_duration_seconds_bucket{job=\"ticket-triage-dev\"}[5m]))", "legendFormat": "p50 triage", "refId": "A" },
+            { "datasource": { "type": "prometheus", "uid": "triage-prometheus" }, "expr": "histogram_quantile(0.95, rate(triage_duration_seconds_bucket{job=\"ticket-triage-dev\"}[5m]))", "legendFormat": "p95 triage", "refId": "B" }
+          ]
+        }
+      ]
+    }

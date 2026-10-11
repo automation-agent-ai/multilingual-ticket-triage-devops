@@ -23,4 +23,4 @@ patches:
 # Image tag override — use the pre-loaded local image.
 images:
   - name: ticket-triage-api
-    newTag: latest
+    newTag: s07-metrics
