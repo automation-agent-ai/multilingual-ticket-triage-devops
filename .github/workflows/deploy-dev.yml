@@ -81,6 +81,13 @@ jobs:
       REGISTRY: ghcr.io
       IMAGE_NAME: automation-agent-ai/multilingual-ticket-triage-devops
       NAMESPACE: triage-dev
+      # Deterministic kubeconfig path — derived from run context so it is known
+      # at template-evaluation time and accessible by ALL steps without relying
+      # on step outputs.  Using a fixed path (not mktemp) eliminates the attack
+      # surface where steps.kubeconfig.outputs.path evaluates to "" (empty) when
+      # the write step fails, which would cause kubectl to fall back to the host
+      # ~/.kube/config (docker-desktop cluster-admin) and bypass scoped RBAC.
+      KUBECONFIG: /tmp/kubeconfig-${{ github.run_id }}-${{ github.run_attempt }}
 
     steps:
       # ── Resolve image tag ───────────────────────────────────────────────
@@ -163,18 +170,33 @@ jobs:
       # ── Write scoped kubeconfig ──────────────────────────────────────────
       # KUBECONFIG_DEV is stored as a GitHub Environment secret.
       # Content: scoped kubeconfig for cicd-deployer ServiceAccount (triage-dev).
-      # The file is written to a tmpfs location, used, and deleted in the
-      # same step (or the cleanup step below on failure).
+      #
+      # Security design:
+      #   • Target path is the job-level KUBECONFIG env var (fixed, deterministic).
+      #     All cluster steps inherit it automatically — no step output involved.
+      #     This eliminates the race where steps.kubeconfig.outputs.path evaluates
+      #     to "" on step failure and kubectl falls back to ~/.kube/config
+      #     (docker-desktop cluster-admin), bypassing the scoped cicd-deployer RBAC.
+      #   • File is chmod 600 (owner-only read/write).
+      #   • Verified non-empty before succeeding (catches missing/empty secret).
+      #   • Deleted in the always() cleanup step below.
       - name: Write scoped kubeconfig
         id: kubeconfig
         env:
           KUBECONFIG_DATA: ${{ secrets.KUBECONFIG_DEV }}
         run: |
-          KUBECONFIG_FILE="$(mktemp /tmp/kubeconfig-XXXXXX)"
-          echo "$KUBECONFIG_DATA" > "$KUBECONFIG_FILE"
-          chmod 600 "$KUBECONFIG_FILE"
-          echo "path=$KUBECONFIG_FILE" >> "$GITHUB_OUTPUT"
-          echo "Kubeconfig written (permissions 600)"
+          # KUBECONFIG path is set by the job-level env block (fixed, deterministic).
+          echo "$KUBECONFIG_DATA" > "$KUBECONFIG"
+          chmod 600 "$KUBECONFIG"
+          # Abort early if the secret was empty or missing — do not proceed with
+          # an empty KUBECONFIG file that would cause kubectl to fall back to
+          # the host admin config.
+          if [ ! -s "$KUBECONFIG" ]; then
+            echo "::error::KUBECONFIG_DEV secret is empty or missing. Aborting."
+            rm -f "$KUBECONFIG"
+            exit 1
+          fi
+          echo "Scoped kubeconfig written to: $KUBECONFIG (permissions 600)"
 
       # ── Apply to DEV cluster ─────────────────────────────────────────────
       # The ci-overlay includes a Namespace resource (already exists in cluster).
@@ -183,9 +205,14 @@ jobs:
       # and strip Namespace docs before applying (the namespace already exists).
       - name: Apply to triage-dev cluster
         id: apply
-        env:
-          KUBECONFIG: ${{ steps.kubeconfig.outputs.path }}
         run: |
+          # Guard: abort loudly if the scoped kubeconfig file is absent.
+          # An empty KUBECONFIG would cause kubectl to fall back to the host
+          # ~/.kube/config (cluster-admin), bypassing cicd-deployer RBAC.
+          if [ ! -f "${KUBECONFIG}" ]; then
+            echo "::error::Scoped kubeconfig not found at '${KUBECONFIG}'. Aborting to prevent admin credential fallback."
+            exit 1
+          fi
           # Render manifests and strip the Namespace document.
           # The cicd-deployer SA has no GET on cluster-scoped Namespace resources.
           # The triage-dev namespace already exists; no need to manage it via CD.
@@ -201,9 +228,11 @@ jobs:
       # ── Rollout verification ─────────────────────────────────────────────
       - name: Wait for rollout to complete
         id: rollout
-        env:
-          KUBECONFIG: ${{ steps.kubeconfig.outputs.path }}
         run: |
+          if [ ! -f "${KUBECONFIG}" ]; then
+            echo "::error::Scoped kubeconfig not found at '${KUBECONFIG}'. Aborting."
+            exit 1
+          fi
           echo "Waiting for deployment/ticket-triage rollout (timeout: 300s)"
           kubectl rollout status deployment/ticket-triage \
             --namespace "${{ env.NAMESPACE }}" \
@@ -211,9 +240,11 @@ jobs:
 
       # ── Smoke test — health endpoints ────────────────────────────────────
       - name: Verify readiness via kubectl exec probe
-        env:
-          KUBECONFIG: ${{ steps.kubeconfig.outputs.path }}
         run: |
+          if [ ! -f "${KUBECONFIG}" ]; then
+            echo "::error::Scoped kubeconfig not found at '${KUBECONFIG}'. Aborting."
+            exit 1
+          fi
           POD=$(kubectl get pod \
             -n "${{ env.NAMESPACE }}" \
             -l app=ticket-triage \
@@ -234,9 +265,11 @@ jobs:
 
       # ── Verify image provenance ──────────────────────────────────────────
       - name: Confirm image reference on running pod
-        env:
-          KUBECONFIG: ${{ steps.kubeconfig.outputs.path }}
         run: |
+          if [ ! -f "${KUBECONFIG}" ]; then
+            echo "::error::Scoped kubeconfig not found at '${KUBECONFIG}'. Aborting."
+            exit 1
+          fi
           ACTUAL=$(kubectl get pod \
             -n "${{ env.NAMESPACE }}" \
             -l app=ticket-triage \
@@ -255,10 +288,20 @@ jobs:
       # Does NOT run for smoke-test step failures (exec/verify errors
       # are post-deployment checks, not deployment failures).
       - name: Rollback on failure
-        if: failure() && steps.apply.outcome == 'success' && steps.rollout.outcome == 'failure'
-        env:
-          KUBECONFIG: ${{ steps.kubeconfig.outputs.path }}
+        # kubeconfig.outcome == 'success' is required: without it this step could
+        # run under the failure() condition even when the kubeconfig was never
+        # written, causing kubectl to fall back to the host ~/.kube/config
+        # (cluster-admin) for the rollback — a security bypass.
+        if: >-
+          failure()
+          && steps.kubeconfig.outcome == 'success'
+          && steps.apply.outcome == 'success'
+          && steps.rollout.outcome == 'failure'
         run: |
+          if [ ! -f "${KUBECONFIG}" ]; then
+            echo "::error::Scoped kubeconfig not found at '${KUBECONFIG}'. Aborting rollback to prevent admin credential fallback."
+            exit 1
+          fi
           echo "::warning::Rollout failed — rolling back deployment/ticket-triage"
           kubectl rollout undo deployment/ticket-triage \
             --namespace "${{ env.NAMESPACE }}"
@@ -268,19 +311,23 @@ jobs:
           echo "Rollback complete."
 
       # ── Kubeconfig cleanup (always) ──────────────────────────────────────
+      # Uses the job-level KUBECONFIG env var (fixed path), NOT step outputs.
+      # steps.kubeconfig.outputs.path evaluates to "" if the write step failed,
+      # making [ -f "" ] a silent no-op that leaks the file.  The fixed path
+      # is always known regardless of step outcome.
       - name: Delete scoped kubeconfig
         if: always()
         run: |
-          if [ -f "${{ steps.kubeconfig.outputs.path }}" ]; then
-            rm -f "${{ steps.kubeconfig.outputs.path }}"
-            echo "Kubeconfig deleted."
+          if [ -f "${KUBECONFIG}" ]; then
+            rm -f "${KUBECONFIG}"
+            echo "Kubeconfig deleted: ${KUBECONFIG}"
+          else
+            echo "Kubeconfig not present at '${KUBECONFIG}' — nothing to delete."
           fi
 
       # ── Job summary ──────────────────────────────────────────────────────
       - name: Write job summary
         if: always()
-        env:
-          KUBECONFIG: ${{ steps.kubeconfig.outputs.path }}
         run: |
           RESULT="✅ Deployed"
           if [ "${{ steps.rollout.outcome }}" != "success" ]; then
