@@ -177,13 +177,27 @@ jobs:
           echo "Kubeconfig written (permissions 600)"
 
       # ── Apply to DEV cluster ─────────────────────────────────────────────
+      # The ci-overlay includes a Namespace resource (already exists in cluster).
+      # The cicd-deployer SA cannot GET cluster-scoped Namespace resources
+      # (by design — no cluster-level permissions).  We render the manifests
+      # and strip Namespace docs before applying (the namespace already exists).
       - name: Apply to triage-dev cluster
         id: apply
         env:
           KUBECONFIG: ${{ steps.kubeconfig.outputs.path }}
         run: |
-          echo "Applying k8s/ci-overlays/dev to namespace: ${{ env.NAMESPACE }}"
-          kubectl apply -k k8s/ci-overlays/dev --namespace "${{ env.NAMESPACE }}"
+          echo "Rendering manifests and filtering out Namespace resource..."
+          kubectl kustomize k8s/ci-overlays/dev \
+            | python3 -c "
+import sys, re
+docs = sys.stdin.read().split('\n---\n')
+filtered = [d for d in docs if not re.search(r'^kind:\s*Namespace', d, re.MULTILINE)]
+print('\n---\n'.join(filtered))
+" > /tmp/deploy-dev-manifests.yaml
+
+          echo "Applying to namespace: ${{ env.NAMESPACE }}"
+          kubectl apply -f /tmp/deploy-dev-manifests.yaml
+          rm -f /tmp/deploy-dev-manifests.yaml
 
       # ── Rollout verification ─────────────────────────────────────────────
       - name: Wait for rollout to complete
