@@ -81,12 +81,10 @@ Create `github-actions-trust-policy.json`:
       "Action": "sts:AssumeRoleWithWebIdentity",
       "Condition": {
         "StringEquals": {
-          "token.actions.githubusercontent.com:aud": "sts.amazonaws.com"
-        },
-        "StringLike": {
+          "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
           "token.actions.githubusercontent.com:sub": [
-            "repo:automation-agent-ai/multilingual-ticket-triage-devops:ref:refs/heads/feat/aws-bedrock-migration",
-            "repo:automation-agent-ai/multilingual-ticket-triage-devops:ref:refs/heads/main"
+            "repo:automation-agent-ai/multilingual-ticket-triage-devops:environment:aws-dev",
+            "repo:automation-agent-ai/multilingual-ticket-triage-devops:environment:aws-prod"
           ]
         }
       }
@@ -98,10 +96,17 @@ Create `github-actions-trust-policy.json`:
 **Trust policy breakdown:**
 - `Federated`: GitHub OIDC provider ARN
 - `aud`: Must be `sts.amazonaws.com` (AWS STS audience)
-- `sub`: Repository and branch pattern
-  - `repo:<org>/<repo>:ref:refs/heads/<branch>`
-  - Allows `feat/aws-bedrock-migration` and `main` branches
-  - **Blocks all other branches and forks**
+- `sub`: **Environment-based OIDC subject claims**
+  - `repo:<org>/<repo>:environment:<environment-name>`
+  - When workflow uses `environment: aws-dev`, subject is `repo:...:environment:aws-dev`
+  - More secure than branch-based claims
+  - **Blocks all non-environment jobs and forks**
+
+**IMPORTANT:** GitHub OIDC subject format changes when using environments:
+- **Without environment:** `repo:...:ref:refs/heads/<branch>`
+- **With environment:** `repo:...:environment:<environment-name>`
+
+See: https://docs.github.com/en/actions/deployment/security-hardening-your-deployments/about-security-hardening-with-openid-connect#understanding-the-oidc-token
 
 ### Permissions Policy
 
@@ -574,11 +579,11 @@ data "aws_iam_policy_document" "github_actions_assume_role" {
     }
     
     condition {
-      test     = "StringLike"
+      test     = "StringEquals"
       variable = "token.actions.githubusercontent.com:sub"
       values = [
-        "repo:automation-agent-ai/multilingual-ticket-triage-devops:ref:refs/heads/feat/aws-bedrock-migration",
-        "repo:automation-agent-ai/multilingual-ticket-triage-devops:ref:refs/heads/main"
+        "repo:automation-agent-ai/multilingual-ticket-triage-devops:environment:aws-dev",
+        "repo:automation-agent-ai/multilingual-ticket-triage-devops:environment:aws-prod"
       ]
     }
   }
