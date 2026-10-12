@@ -91,14 +91,25 @@ class FakeNeighborRetriever:
 
 
 class FakeAnalyzer:
-    """Returns a fixed LLMAnalysis and records the call."""
+    """Returns a fixed LLMAnalysis and metadata, and records the call."""
 
     def __init__(self) -> None:
         self.called = False
 
-    def analyze(self, ticket: TicketInput, neighbor_prediction: NeighborPrediction) -> LLMAnalysis:
+    def analyze(self, ticket: TicketInput, neighbor_prediction: NeighborPrediction) -> tuple[LLMAnalysis, dict]:
         self.called = True
-        return _FIXED_ANALYSIS
+        # Return fake metadata along with analysis
+        metadata = {
+            "provider": "fake",
+            "model_id": "fake-model",
+            "region": None,
+            "invoked": True,
+            "input_tokens": 100,
+            "output_tokens": 50,
+            "latency_ms": 500,
+            "invocation_count": 1,
+        }
+        return _FIXED_ANALYSIS, metadata
 
 
 class FakeValidator:
