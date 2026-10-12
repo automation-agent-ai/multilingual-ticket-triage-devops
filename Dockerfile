@@ -79,6 +79,7 @@ COPY --from=builder /usr/local/bin /usr/local/bin
 COPY --chown=appuser:appgroup api/        ./api/
 COPY --chown=appuser:appgroup src/        ./src/
 COPY --chown=appuser:appgroup config.yaml ./config.yaml
+COPY --chown=appuser:appgroup config-aws.yaml ./config-aws.yaml
 
 # ── Runtime directories ───────────────────────────────────────────────────────
 # data/    — DuckDB and LanceDB mount point (provided as volume at runtime).

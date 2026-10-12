@@ -50,7 +50,7 @@ from src.infrastructure.duckdb_repository import DuckDBRepository
 from src.infrastructure.embedding_model import EmbeddingModel
 from src.infrastructure.evaluation_repository import EvaluationRepository
 from src.infrastructure.lancedb_ticket_store import LanceDBTicketStore
-from src.infrastructure.llm_client import OllamaClient
+from src.infrastructure.llm_provider import create_llm_client, create_reviewer_client
 from src.infrastructure.trace_writer import write_jsonl
 
 CSV_PATH    = "data/dataset-tickets-multi-lang3-4k.csv"
@@ -247,12 +247,7 @@ def _build_agent(cfg: dict, embedding_model: EmbeddingModel) -> TicketTriageAgen
     ret_cfg    = cfg["retrieval"]
     thresholds = cfg.get("thresholds", {})
 
-    llm_client = OllamaClient(
-        base_url=llm_cfg["base_url"],
-        model_name=llm_cfg["model_name"],
-        temperature=llm_cfg.get("temperature", 0.1),
-        timeout_seconds=llm_cfg.get("timeout_seconds", 120),
-    )
+    llm_client = create_llm_client(llm_cfg)
     store = LanceDBTicketStore(path=vs_cfg["path"], table_name=vs_cfg["table_name"])
     retriever = NeighborRetriever(
         embedding_model=embedding_model,
@@ -276,12 +271,7 @@ def _build_agent(cfg: dict, embedding_model: EmbeddingModel) -> TicketTriageAgen
     reviewer = None
     reviewer_cfg = cfg.get("reviewer", {})
     if reviewer_cfg.get("enabled", False):
-        reviewer_client = OllamaClient(
-            base_url=reviewer_cfg.get("base_url", llm_cfg["base_url"]),
-            model_name=reviewer_cfg["model_name"],
-            temperature=reviewer_cfg.get("temperature", 0.1),
-            timeout_seconds=llm_cfg.get("timeout_seconds", 120),
-        )
+        reviewer_client = create_reviewer_client(llm_cfg, reviewer_cfg)
         reviewer = ConditionalLLMReviewer(
             llm_client=reviewer_client,
             trigger_flags=reviewer_cfg.get("trigger_flags", []),
