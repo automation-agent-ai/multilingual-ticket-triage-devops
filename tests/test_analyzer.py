@@ -64,9 +64,20 @@ class FakeLLMClient:
         self._iter   = iter(responses)
         self.prompts: list[str] = []
 
-    def generate_json(self, prompt: str) -> str:
+    def generate_json(self, prompt: str) -> tuple[str, dict]:
         self.prompts.append(prompt)
-        return next(self._iter)
+        text = next(self._iter)
+        # Return fake metadata - explicitly set provider to enable test assertions
+        metadata = {
+            "provider": "fake",  # Explicit provider for testing
+            "model_id": "fake-model",
+            "region": None,
+            "invoked": True,
+            "input_tokens": 10,
+            "output_tokens": 20,
+            "latency_ms": 100,
+        }
+        return text, metadata
 
 
 def make_ticket() -> TicketInput:
@@ -114,7 +125,7 @@ def make_prediction() -> NeighborPrediction:
 def test_valid_json_returns_llm_analysis():
     client   = FakeLLMClient(VALID_JSON)
     analyzer = LocalLLMAnalyzer(llm_client=client, max_retries=1)
-    result   = analyzer.analyze(make_ticket(), make_prediction())
+    result, metadata = analyzer.analyze(make_ticket(), make_prediction())
 
     assert isinstance(result, LLMAnalysis)
     assert result.topic    == Topic.TECHNICAL
@@ -122,6 +133,8 @@ def test_valid_json_returns_llm_analysis():
     assert result.confidence == pytest.approx(0.86)
     assert result.missing_info is False
     assert len(client.prompts) == 1
+    assert metadata["provider"] == "fake"
+    assert metadata["invocation_count"] == 1
 
 
 # ─── Retry on invalid JSON ────────────────────────────────────────────────────
@@ -129,28 +142,32 @@ def test_valid_json_returns_llm_analysis():
 def test_invalid_json_triggers_retry():
     client   = FakeLLMClient(INVALID_JSON, VALID_JSON)
     analyzer = LocalLLMAnalyzer(llm_client=client, max_retries=1)
-    result   = analyzer.analyze(make_ticket(), make_prediction())
+    result, metadata = analyzer.analyze(make_ticket(), make_prediction())
 
     assert len(client.prompts) == 2, "Expected exactly one retry"
     assert result.topic == Topic.TECHNICAL
+    assert metadata["invocation_count"] == 2
+    assert metadata["input_tokens"] == 20  # 10 + 10
 
 
 def test_invalid_topic_triggers_retry():
     client   = FakeLLMClient(INVALID_TOPIC_JSON, VALID_JSON)
     analyzer = LocalLLMAnalyzer(llm_client=client, max_retries=1)
-    result   = analyzer.analyze(make_ticket(), make_prediction())
+    result, metadata = analyzer.analyze(make_ticket(), make_prediction())
 
     assert len(client.prompts) == 2
     assert result.topic == Topic.TECHNICAL
+    assert metadata["invocation_count"] == 2
 
 
 def test_invalid_urgency_triggers_retry():
     client   = FakeLLMClient(INVALID_URGENCY_JSON, VALID_JSON)
     analyzer = LocalLLMAnalyzer(llm_client=client, max_retries=1)
-    result   = analyzer.analyze(make_ticket(), make_prediction())
+    result, metadata = analyzer.analyze(make_ticket(), make_prediction())
 
     assert len(client.prompts) == 2
     assert result.urgency == Urgency.HIGH
+    assert metadata["invocation_count"] == 2
 
 
 # ─── Retry success ────────────────────────────────────────────────────────────
@@ -158,11 +175,12 @@ def test_invalid_urgency_triggers_retry():
 def test_retry_success_returns_corrected_analysis():
     client   = FakeLLMClient(INVALID_JSON, VALID_JSON)
     analyzer = LocalLLMAnalyzer(llm_client=client, max_retries=1)
-    result   = analyzer.analyze(make_ticket(), make_prediction())
+    result, metadata = analyzer.analyze(make_ticket(), make_prediction())
 
     assert result.topic      == Topic.TECHNICAL
     assert result.confidence == pytest.approx(0.86)
     assert result.short_note == "Customer reports a login access issue on the portal."
+    assert metadata["invocation_count"] == 2
 
 
 # ─── Retry failure → fallback ─────────────────────────────────────────────────
@@ -170,24 +188,26 @@ def test_retry_success_returns_corrected_analysis():
 def test_retry_failure_returns_fallback():
     client   = FakeLLMClient(INVALID_JSON, INVALID_JSON)
     analyzer = LocalLLMAnalyzer(llm_client=client, max_retries=1)
-    result   = analyzer.analyze(make_ticket(), make_prediction())
+    result, metadata = analyzer.analyze(make_ticket(), make_prediction())
 
     assert result.topic      == Topic.OTHER
     assert result.urgency    == Urgency.MEDIUM
     assert result.confidence == pytest.approx(0.0)
     assert result.missing_info is True
     assert "valid_structured_llm_output" in result.missing_fields
+    assert metadata["invocation_count"] == 2
 
 
 def test_max_retries_zero_skips_retry():
     """With max_retries=0, invalid output goes straight to fallback."""
     client   = FakeLLMClient(INVALID_JSON)
     analyzer = LocalLLMAnalyzer(llm_client=client, max_retries=0)
-    result   = analyzer.analyze(make_ticket(), make_prediction())
+    result, metadata = analyzer.analyze(make_ticket(), make_prediction())
 
     assert len(client.prompts) == 1, "No retry should occur with max_retries=0"
     assert result.topic      == Topic.OTHER
     assert result.confidence == pytest.approx(0.0)
+    assert metadata["invocation_count"] == 1
 
 
 # ─── Prompt content ───────────────────────────────────────────────────────────
@@ -195,7 +215,7 @@ def test_max_retries_zero_skips_retry():
 def test_prompt_contains_all_assignment_topics():
     client   = FakeLLMClient(VALID_JSON)
     analyzer = LocalLLMAnalyzer(llm_client=client, max_retries=1)
-    analyzer.analyze(make_ticket(), make_prediction())
+    result, metadata = analyzer.analyze(make_ticket(), make_prediction())
 
     prompt = client.prompts[0]
     assert "Policy / Contract"        in prompt
@@ -208,7 +228,7 @@ def test_prompt_contains_all_assignment_topics():
 def test_prompt_contains_allowed_urgency_values():
     client   = FakeLLMClient(VALID_JSON)
     analyzer = LocalLLMAnalyzer(llm_client=client, max_retries=1)
-    analyzer.analyze(make_ticket(), make_prediction())
+    result, metadata = analyzer.analyze(make_ticket(), make_prediction())
 
     prompt = client.prompts[0]
     assert "Low"    in prompt
@@ -220,7 +240,7 @@ def test_prompt_contains_neighbor_evidence():
     prediction = make_prediction()
     client     = FakeLLMClient(VALID_JSON)
     analyzer   = LocalLLMAnalyzer(llm_client=client, max_retries=1)
-    analyzer.analyze(make_ticket(), prediction)
+    result, metadata = analyzer.analyze(make_ticket(), prediction)
 
     prompt = client.prompts[0]
     assert "Technical Support" in prompt   # predicted_queue
@@ -231,7 +251,7 @@ def test_prompt_contains_ticket_subject_and_body():
     ticket   = make_ticket()
     client   = FakeLLMClient(VALID_JSON)
     analyzer = LocalLLMAnalyzer(llm_client=client, max_retries=1)
-    analyzer.analyze(ticket, make_prediction())
+    result, metadata = analyzer.analyze(ticket, make_prediction())
 
     prompt = client.prompts[0]
     assert "Cannot login to the customer portal" in prompt
@@ -242,7 +262,7 @@ def test_correction_prompt_contains_original_response_and_error():
     """The correction prompt must echo the original bad response and the error."""
     client   = FakeLLMClient(INVALID_JSON, VALID_JSON)
     analyzer = LocalLLMAnalyzer(llm_client=client, max_retries=1)
-    analyzer.analyze(make_ticket(), make_prediction())
+    result, metadata = analyzer.analyze(make_ticket(), make_prediction())
 
     correction_prompt = client.prompts[1]
     assert INVALID_JSON in correction_prompt

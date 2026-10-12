@@ -95,9 +95,18 @@ class BedrockClient:
             self.region,
         )
 
-    def generate_json(self, prompt: str) -> str:
+    def generate_json(self, prompt: str) -> tuple[str, dict]:
         """
-        Send prompt to Bedrock and return the model's response text.
+        Send prompt to Bedrock and return the model's response text and metadata.
+
+        Returns:
+            (text, metadata_dict) where metadata_dict contains:
+                - input_tokens: int | None
+                - output_tokens: int | None  
+                - latency_ms: int | None
+                - model_id: str
+                - region: str
+                - invoked: bool (True if successful)
 
         Raises botocore.exceptions.ClientError on Bedrock API errors.
         Raises botocore.exceptions.ReadTimeoutError if the read times out.
@@ -129,7 +138,11 @@ class BedrockClient:
         text = _extract_text(response)
         if not text.strip():
             raise ValueError("Bedrock response did not contain text")
-        return _coerce_json_text(text)
+        
+        # Extract inference metadata from response
+        metadata = _extract_metadata(response, self.model_id, self.region)
+        
+        return _coerce_json_text(text), metadata
 
 
 def _extract_text(response: dict) -> str:
@@ -212,3 +225,49 @@ def _coerce_json_text(text: str) -> str:
     if extracted is not None and _is_json_value(extracted):
         return extracted
     return text
+
+
+def _extract_metadata(response: dict, model_id: str, region: str) -> dict:
+    """
+    Extract inference metadata from Bedrock Converse API response.
+    
+    Returns dict with keys: input_tokens, output_tokens, latency_ms, 
+    model_id, region, invoked. All values are defensive - missing fields
+    become None rather than raising exceptions.
+    
+    Args:
+        response: The full boto3 converse() response dict
+        model_id: The model/inference profile ID used
+        region: The AWS region used
+        
+    Returns:
+        dict with inference metadata
+    """
+    metadata = {
+        "input_tokens": None,
+        "output_tokens": None,
+        "latency_ms": None,
+        "model_id": model_id,
+        "region": region,
+        "invoked": True,  # If we reached here, the call succeeded
+    }
+    
+    # Extract token usage
+    try:
+        usage = response.get("usage", {})
+        if "inputTokens" in usage:
+            metadata["input_tokens"] = int(usage["inputTokens"])
+        if "outputTokens" in usage:
+            metadata["output_tokens"] = int(usage["outputTokens"])
+    except (KeyError, TypeError, ValueError) as e:
+        logger.debug(f"Could not extract usage from Bedrock response: {e}")
+    
+    # Extract latency metrics
+    try:
+        metrics = response.get("metrics", {})
+        if "latencyMs" in metrics:
+            metadata["latency_ms"] = int(metrics["latencyMs"])
+    except (KeyError, TypeError, ValueError) as e:
+        logger.debug(f"Could not extract metrics from Bedrock response: {e}")
+    
+    return metadata

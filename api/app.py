@@ -92,6 +92,8 @@ class TicketTriageResponse(BaseModel):
 
     Returns the complete TriageResult with topic, urgency, next_action,
     confidence, flags, and action execution result.
+    
+    New in Phase 10C: inference field with real LLM metadata.
     """
 
     ticket_id: str
@@ -105,6 +107,10 @@ class TicketTriageResponse(BaseModel):
     requires_human_review: bool
     short_note: str
     action_result: dict[str, Any] | None = None
+    inference: dict[str, Any] | None = Field(
+        default=None,
+        description="Real inference metadata from the LLM provider (provider, model, region, tokens, latency)"
+    )
 
 
 class HealthResponse(BaseModel):
@@ -341,7 +347,7 @@ def _triage_result_to_response(result: TriageResult) -> TicketTriageResponse:
     """
     Convert TriageResult to HTTP response body.
 
-    Extracts enum values as strings and serializes action_result to dict.
+    Extracts enum values as strings and serializes action_result and inference to dict.
     """
     action_result_dict = None
     if result.action_result is not None:
@@ -350,6 +356,19 @@ def _triage_result_to_response(result: TriageResult) -> TicketTriageResponse:
             "action_status": result.action_result.action_status,
             "action_note": result.action_result.action_note,
             "target": result.action_result.target,
+        }
+
+    inference_dict = None
+    if result.inference is not None:
+        inference_dict = {
+            "provider": result.inference.provider,
+            "model": result.inference.model,
+            "region": result.inference.region,
+            "invoked": result.inference.invoked,
+            "input_tokens": result.inference.input_tokens,
+            "output_tokens": result.inference.output_tokens,
+            "latency_ms": result.inference.latency_ms,
+            "invocation_count": result.inference.invocation_count,
         }
 
     return TicketTriageResponse(
@@ -364,6 +383,7 @@ def _triage_result_to_response(result: TriageResult) -> TicketTriageResponse:
         requires_human_review=result.requires_human_review,
         short_note=result.short_note,
         action_result=action_result_dict,
+        inference=inference_dict,
     )
 
 

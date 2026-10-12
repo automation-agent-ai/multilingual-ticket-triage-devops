@@ -1,0 +1,43 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ticket-triage
+  namespace: triage-dev
+spec:
+  replicas: 1
+  template:
+    spec:
+      # ── Volumes (AWS EC2 actual paths) ─────────────────────────────────────
+      # Data verified at: /home/ubuntu/workspaces/multilingual-ticket-triage-devops/data/
+      # DuckDB checksum: f4d4dc42ef61c8a6267a76a68c2f386d6235261eba8788f3215bdb2ba9f50887
+      # LanceDB: 3,206 vectors (ticket_embeddings table)
+      # Permissions: 755 ubuntu:ubuntu (UID 1000, readable by pod)
+      volumes:
+        - name: hf-cache
+          hostPath:
+            path: /home/ubuntu/.cache/huggingface
+            type: DirectoryOrCreate
+        - name: app-data
+          hostPath:
+            path: /home/ubuntu/workspaces/multilingual-ticket-triage-devops/data
+            type: Directory
+        - name: outputs
+          emptyDir: {}
+      
+      containers:
+        - name: api
+          # ── Image Pull Policy ────────────────────────────────────────────────
+          # Override base Never policy — GHCR images require remote pull
+          imagePullPolicy: Always
+          
+          # ── Resource Limits (AWS DEV — 4 vCPU / 16 GiB node) ───────────────
+          # Conservative allocation for shared node with PROD and monitoring.
+          # Request: 500m CPU / 2 GiB RAM (guaranteed baseline)
+          # Limit: 1500m CPU / 4 GiB RAM (burst capacity)
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "2Gi"
+            limits:
+              cpu: "1500m"
+              memory: "4Gi"

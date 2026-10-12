@@ -47,6 +47,13 @@ def _converse_response(text: str) -> dict:
     }
 
 
+def _converse_response_with_metrics(text: str, latency_ms: int = 850) -> dict:
+    """Converse response with latencyMs included in metrics."""
+    response = _converse_response(text)
+    response["metrics"] = {"latencyMs": latency_ms}
+    return response
+
+
 @pytest.fixture
 def mock_runtime():
     with patch("src.infrastructure.bedrock_client.boto3.client") as mock_client:
@@ -112,8 +119,9 @@ def test_generate_json_returns_full_schema_text(mock_runtime):
     runtime.converse.return_value = _converse_response(FULL_JSON)
     client = _client()
 
-    result = client.generate_json("classify this ticket")
+    result, metadata = client.generate_json("classify this ticket")
 
+    # Verify the text response
     analysis = LLMAnalysis.model_validate_json(result)
     assert analysis.topic == Topic.TECHNICAL
     assert analysis.urgency == Urgency.HIGH
@@ -121,6 +129,14 @@ def test_generate_json_returns_full_schema_text(mock_runtime):
     assert analysis.missing_fields == []
     assert analysis.confidence == pytest.approx(0.86)
     assert analysis.short_note.startswith("Customer reports")
+
+    # Verify the metadata
+    assert metadata["model_id"] == "eu.amazon.nova-micro-v1:0"
+    assert metadata["region"] == "eu-west-1"
+    assert metadata["invoked"] is True
+    assert metadata["input_tokens"] == 20
+    assert metadata["output_tokens"] == 40
+    assert metadata["latency_ms"] is None  # Not in mock response
 
     mock_client.assert_called_once()
     assert mock_client.call_args.args == ("bedrock-runtime",)
@@ -148,10 +164,11 @@ def test_generate_json_strips_markdown_fence(mock_runtime):
     runtime.converse.return_value = _converse_response(
         "```json\n" + FULL_JSON + "\n```"
     )
-    result = _client().generate_json("prompt")
+    result, metadata = _client().generate_json("prompt")
     analysis = LLMAnalysis.model_validate_json(result)
     assert analysis.topic == Topic.TECHNICAL
     assert analysis.missing_info is False
+    assert metadata["invoked"] is True
 
 
 def test_generate_json_extracts_object_from_preamble(mock_runtime):
@@ -159,16 +176,47 @@ def test_generate_json_extracts_object_from_preamble(mock_runtime):
     runtime.converse.return_value = _converse_response(
         "Here is the triage decision:\n" + FULL_JSON
     )
-    result = _client().generate_json("prompt")
+    result, metadata = _client().generate_json("prompt")
     assert LLMAnalysis.model_validate_json(result).urgency == Urgency.HIGH
+    assert metadata["invoked"] is True
+
+
+def test_metadata_includes_latency_when_present(mock_runtime):
+    """Test that latencyMs is extracted from Bedrock metrics when available."""
+    runtime, _ = mock_runtime
+    runtime.converse.return_value = _converse_response_with_metrics(FULL_JSON, latency_ms=920)
+    result, metadata = _client().generate_json("prompt")
+    
+    assert metadata["invoked"] is True
+    assert metadata["input_tokens"] == 20
+    assert metadata["output_tokens"] == 40
+    assert metadata["latency_ms"] == 920
+    assert metadata["model_id"] == "eu.amazon.nova-micro-v1:0"
+    assert metadata["region"] == "eu-west-1"
+
+
+def test_metadata_handles_missing_metrics_gracefully(mock_runtime):
+    """Test that missing metrics fields don't cause failures."""
+    runtime, _ = mock_runtime
+    response = _converse_response(FULL_JSON)
+    # Explicitly remove usage to simulate edge case
+    del response["usage"]
+    runtime.converse.return_value = response
+    result, metadata = _client().generate_json("prompt")
+    
+    assert metadata["invoked"] is True
+    assert metadata["input_tokens"] is None
+    assert metadata["output_tokens"] is None
+    assert metadata["latency_ms"] is None
 
 
 def test_topic_and_urgency_only_still_fails_schema(mock_runtime):
     """Partial JSON is returned, and the existing schema still rejects it."""
     runtime, _ = mock_runtime
     runtime.converse.return_value = _converse_response(TOPIC_URGENCY_ONLY)
-    result = _client().generate_json("prompt")
+    result, metadata = _client().generate_json("prompt")
     assert "topic" in result
+    assert metadata["invoked"] is True
     with pytest.raises(ValidationError):
         LLMAnalysis.model_validate_json(result)
 
@@ -180,23 +228,28 @@ def test_analyzer_retries_malformed_bedrock_json_then_accepts_full_schema(mock_r
         _converse_response(FULL_JSON),
     ]
     analyzer = LocalLLMAnalyzer(llm_client=_client(), max_retries=1)
-    result = analyzer.analyze(_ticket(), _prediction())
+    result, metadata = analyzer.analyze(_ticket(), _prediction())
 
     assert result.topic == Topic.TECHNICAL
     assert result.confidence == pytest.approx(0.86)
     assert runtime.converse.call_count == 2
+    assert metadata["invocation_count"] == 2
+    # Check that tokens are summed (2 calls with 20/40 each)
+    assert metadata["input_tokens"] == 40
+    assert metadata["output_tokens"] == 80
 
 
 def test_analyzer_fallback_when_bedrock_never_satisfies_schema(mock_runtime):
     runtime, _ = mock_runtime
     runtime.converse.return_value = _converse_response(TOPIC_URGENCY_ONLY)
     analyzer = LocalLLMAnalyzer(llm_client=_client(), max_retries=1)
-    result = analyzer.analyze(_ticket(), _prediction())
+    result, metadata = analyzer.analyze(_ticket(), _prediction())
 
     assert result.topic == Topic.OTHER
     assert result.confidence == pytest.approx(0.0)
     assert "valid_structured_llm_output" in result.missing_fields
     assert runtime.converse.call_count == 2
+    assert metadata["invocation_count"] == 2
 
 
 # ─── Malformed JSON, API errors, timeouts ─────────────────────────────────────
@@ -205,7 +258,9 @@ def test_malformed_json_is_returned_unchanged(mock_runtime):
     runtime, _ = mock_runtime
     raw = "this is not valid json {"
     runtime.converse.return_value = _converse_response(raw)
-    assert _client().generate_json("prompt") == raw
+    result, metadata = _client().generate_json("prompt")
+    assert result == raw
+    assert metadata["invoked"] is True
 
 
 def test_generate_json_raises_client_error(mock_runtime):
@@ -236,7 +291,7 @@ def test_empty_response_raises_value_error(mock_runtime):
 def test_custom_generation_settings_are_forwarded(mock_runtime):
     runtime, mock_client = mock_runtime
     runtime.converse.return_value = _converse_response(FULL_JSON)
-    _client(temperature=0.4, max_tokens=256, top_p=0.8, timeout_seconds=45).generate_json("p")
+    result, metadata = _client(temperature=0.4, max_tokens=256, top_p=0.8, timeout_seconds=45).generate_json("p")
 
     inference = runtime.converse.call_args.kwargs["inferenceConfig"]
     assert inference["temperature"] == pytest.approx(0.4)
@@ -244,6 +299,7 @@ def test_custom_generation_settings_are_forwarded(mock_runtime):
     assert inference["topP"] == pytest.approx(0.8)
     config = mock_client.call_args.kwargs["config"]
     assert config.read_timeout == 45
+    assert metadata["invoked"] is True
 
 
 # ─── Provider selection ───────────────────────────────────────────────────────
@@ -276,8 +332,9 @@ def test_explicit_bedrock_provider_uses_inference_profile(mock_runtime):
     assert client.timeout_seconds == 90
     assert client.max_tokens == 512
     runtime.converse.return_value = _converse_response(FULL_JSON)
-    client.generate_json("prompt")
+    result, metadata = client.generate_json("prompt")
     assert runtime.converse.call_args.kwargs["modelId"] == "eu.amazon.nova-micro-v1:0"
+    assert metadata["model_id"] == "eu.amazon.nova-micro-v1:0"
 
 
 def test_inference_profile_overrides_model_name(mock_runtime):

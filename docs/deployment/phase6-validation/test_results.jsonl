@@ -1,0 +1,60 @@
+{
+  "test_name": "English billing issue",
+  "ticket_id": "TEST-001-BILLING-EN",
+  "topic": "Billing / Payment",
+  "urgency": "Medium",
+  "next_action": "forward_to_billing_team",
+  "confidence": 0.95,
+  "http_status": "200",
+  "response_time_sec": "1.044528"
+}
+{
+  "test_name": "German insurance claim",
+  "ticket_id": "TEST-002-CLAIM-DE",
+  "topic": "Claims / Damage",
+  "urgency": "High",
+  "next_action": "escalate_to_human_supervisor",
+  "confidence": 0.95,
+  "http_status": "200",
+  "response_time_sec": "1.009799"
+}
+{
+  "test_name": "Spanish customer request",
+  "ticket_id": "TEST-003-INFO-ES",
+  "topic": "Policy / Contract",
+  "urgency": "Medium",
+  "next_action": "escalate_to_human_supervisor",
+  "confidence": 0.8,
+  "http_status": "200",
+  "response_time_sec": "1.088031"
+}
+{
+  "test_name": "Low-urgency general inquiry",
+  "ticket_id": "TEST-004-GENERAL-LOW",
+  "topic": "Policy / Contract",
+  "urgency": "Medium",
+  "next_action": "send_standard_faq_or_self_service_link",
+  "confidence": 0.85,
+  "http_status": "200",
+  "response_time_sec": "0.951933"
+}
+{
+  "test_name": "Missing information ticket",
+  "ticket_id": "TEST-005-INCOMPLETE",
+  "topic": "Technical / Online Access",
+  "urgency": "Medium",
+  "next_action": "escalate_to_human_supervisor",
+  "confidence": 0.9,
+  "http_status": "200",
+  "response_time_sec": "0.840239"
+}
+{
+  "test_name": "High-urgency claim escalation",
+  "ticket_id": "TEST-006-URGENT-CLAIM",
+  "topic": "Claims / Damage",
+  "urgency": "High",
+  "next_action": "escalate_to_human_supervisor",
+  "confidence": 0.95,
+  "http_status": "200",
+  "response_time_sec": "1.075245"
+}

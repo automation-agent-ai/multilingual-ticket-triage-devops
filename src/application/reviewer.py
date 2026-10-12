@@ -207,8 +207,8 @@ class ConditionalLLMReviewer:
     Parameters
     ----------
     llm_client:
-        Any object with generate_json(prompt: str) -> str.
-        In production this is a second OllamaClient (potentially a different model).
+        Any object with generate_json(prompt: str) -> tuple[str, dict].
+        In production this is a second BedrockClient or OllamaClient (potentially a different model).
     trigger_flags:
         List of ValidationResult flag strings that may trigger the reviewer.
         Composite confidence-aware rules are applied on top of this list.
@@ -326,7 +326,7 @@ class ConditionalLLMReviewer:
         prompt = _build_reviewer_prompt(
             ticket, neighbor_prediction, first_analysis, validation
         )
-        raw = self.llm_client.generate_json(prompt)
+        raw, _ = self.llm_client.generate_json(prompt)  # Ignore metadata for reviewer
 
         try:
             return LLMAnalysis.model_validate_json(raw)
@@ -335,7 +335,7 @@ class ConditionalLLMReviewer:
                 return _make_fallback()
 
             correction_prompt = _build_correction_prompt(raw, first_error)
-            raw_retry = self.llm_client.generate_json(correction_prompt)
+            raw_retry, _ = self.llm_client.generate_json(correction_prompt)  # Ignore metadata
 
             try:
                 return LLMAnalysis.model_validate_json(raw_retry)

@@ -77,6 +77,29 @@ class ActionExecutionResult(BaseModel):
     target:          str | None = None
 
 
+# ─── Inference metadata ──────────────────────────────────────────────────────
+
+class InferenceMetadata(BaseModel):
+    """
+    Real inference metadata from the LLM provider.
+    
+    This captures actual token usage, latency, and provider information from
+    the inference that produced the classification. All fields are based on
+    real API responses and are never fabricated.
+    
+    For Bedrock: extracted from boto3 Converse API response.
+    For Ollama: provider/model only (no standardized usage metadata).
+    """
+    provider: str = Field(description="LLM provider: 'bedrock' or 'ollama'")
+    model: str = Field(description="Model ID or inference profile used")
+    region: str | None = Field(default=None, description="AWS region (Bedrock only)")
+    invoked: bool = Field(description="True if inference completed successfully")
+    input_tokens: int | None = Field(default=None, description="Total input tokens consumed")
+    output_tokens: int | None = Field(default=None, description="Total output tokens generated")
+    latency_ms: int | None = Field(default=None, description="Inference latency in milliseconds")
+    invocation_count: int = Field(default=1, description="Number of LLM calls (includes retries)")
+
+
 # ─── Final triage result ──────────────────────────────────────────────────────
 # The complete output written to CSV/JSON for the assignment.
 
@@ -92,5 +115,9 @@ class TriageResult(BaseModel):
     requires_human_review: bool
     short_note:            str
     action_result:         ActionExecutionResult | None = None
+    inference:             InferenceMetadata | None = Field(
+        default=None,
+        description="Real inference metadata from the LLM provider"
+    )
 
 

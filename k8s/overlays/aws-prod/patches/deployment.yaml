@@ -1,0 +1,48 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ticket-triage
+  namespace: triage-prod
+spec:
+  replicas: 1
+  template:
+    spec:
+      # ── Volumes (AWS EC2 actual paths) ─────────────────────────────────────
+      # Production uses same verified data as DEV (single-node k3s cluster).
+      # Data verified at: /home/ubuntu/workspaces/multilingual-ticket-triage-devops/data/
+      # Mounted read-only for safety.
+      volumes:
+        - name: hf-cache
+          hostPath:
+            path: /home/ubuntu/.cache/huggingface
+            type: DirectoryOrCreate
+        - name: app-data
+          hostPath:
+            path: /home/ubuntu/workspaces/multilingual-ticket-triage-devops/data
+            type: Directory
+        - name: outputs
+          emptyDir: {}
+      
+      containers:
+        - name: api
+          # ── Image Pull Policy ────────────────────────────────────────────────
+          # Override base Never policy — GHCR images require remote pull
+          imagePullPolicy: Always
+          
+          # ── Resource Limits (AWS PROD — 4 vCPU / 16 GiB node) ──────────────
+          # Match DEV allocation for fair comparison during pre-defense demo.
+          # Can increase independently after validation.
+          # Request: 500m CPU / 2 GiB RAM (guaranteed baseline)
+          # Limit: 1500m CPU / 4 GiB RAM (burst capacity)
+          #
+          # Total allocation with DEV:
+          # DEV: 500m CPU / 2 Gi (requests)
+          # PROD: 500m CPU / 2 Gi (requests)
+          # Total: 1000m / 4 Gi (25% CPU, 25% memory of node)
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "2Gi"
+            limits:
+              cpu: "1500m"
+              memory: "4Gi"
