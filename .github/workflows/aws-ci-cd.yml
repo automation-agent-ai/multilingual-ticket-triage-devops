@@ -460,6 +460,23 @@ jobs:
     environment: aws-prod  # ← APPROVAL GATE
     
     steps:
+      - name: Verify aws-prod environment protection
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          REVIEWERS=$(gh api repos/${{ github.repository }}/environments/aws-prod \
+            --jq '.protection_rules[] | select(.type=="required_reviewers") | .reviewers | length' \
+            2>/dev/null || echo "0")
+          
+          if [ "$REVIEWERS" -lt 1 ]; then
+            echo "::error::aws-prod environment has no required reviewers"
+            echo "PROD deployment BLOCKED for safety"
+            echo "Configure at: https://github.com/${{ github.repository }}/settings/environments"
+            exit 1
+          fi
+          
+          echo "✅ aws-prod has $REVIEWERS required reviewer(s)"
+      
       - name: Checkout code
         uses: actions/checkout@v4
 
