@@ -174,8 +174,8 @@ class LocalLLMAnalyzer:
     Parameters
     ----------
     llm_client:
-        Any object with a generate_json(prompt: str) -> str method.
-        In production this is OllamaClient. In tests a simple fake is used.
+        Any object with a generate_json(prompt: str) -> tuple[str, dict] method.
+        In production this is BedrockClient or OllamaClient. In tests a simple fake is used.
     max_retries:
         Number of correction retries on validation failure. Sprint 5A uses 1.
     debug:
@@ -196,9 +196,9 @@ class LocalLLMAnalyzer:
         self,
         ticket: TicketInput,
         neighbor_prediction: NeighborPrediction,
-    ) -> LLMAnalysis:
+    ) -> tuple[LLMAnalysis, dict]:
         """
-        Run one ticket through the LLM and return a validated LLMAnalysis.
+        Run one ticket through the LLM and return a validated LLMAnalysis and metadata.
 
         Steps:
           1. Build a structured prompt from ticket text and neighbor evidence.
@@ -206,26 +206,87 @@ class LocalLLMAnalyzer:
           3. Parse and validate with LLMAnalysis.model_validate_json(raw).
           4. On failure: build a correction prompt, retry once.
           5. On repeated failure: return safe fallback.
+
+        Returns:
+            (LLMAnalysis, aggregated_metadata_dict)
+            
+        The metadata dict contains:
+            - provider: str ('bedrock' or 'ollama')
+            - model_id: str
+            - region: str | None
+            - invoked: bool (True if at least one call succeeded)
+            - input_tokens: int | None (sum of all calls)
+            - output_tokens: int | None (sum of all calls)
+            - latency_ms: int | None (max of all calls)
+            - invocation_count: int (1 or 2)
         """
         prompt = _build_prompt(ticket, neighbor_prediction)
-        raw    = self.llm_client.generate_json(prompt)
+        raw, metadata = self.llm_client.generate_json(prompt)
 
         if self.debug:
             print(f"\n  [debug] Raw LLM response:\n{raw}\n")
 
+        # Initialize aggregated metadata with first call
+        # Provider detection: prefer explicit provider from metadata, fallback to type inspection
+        provider = metadata.get("provider")
+        if not provider:
+            client_type_str = str(type(self.llm_client)).lower()
+            if "bedrock" in client_type_str:
+                provider = "bedrock"
+            elif "ollama" in client_type_str:
+                provider = "ollama"
+            else:
+                provider = "unknown"
+        
+        aggregated = {
+            "provider": provider,
+            "model_id": metadata.get("model_id", "unknown"),
+            "region": metadata.get("region"),
+            "invoked": metadata.get("invoked", False),
+            "input_tokens": metadata.get("input_tokens"),
+            "output_tokens": metadata.get("output_tokens"),
+            "latency_ms": metadata.get("latency_ms"),
+            "invocation_count": 1,
+        }
+
         try:
-            return LLMAnalysis.model_validate_json(raw)
+            return LLMAnalysis.model_validate_json(raw), aggregated
         except (ValidationError, ValueError) as first_error:
             if self.max_retries < 1:
-                return _make_fallback()
+                return _make_fallback(), aggregated
 
             correction_prompt = _build_correction_prompt(raw, first_error)
-            raw_retry         = self.llm_client.generate_json(correction_prompt)
+            raw_retry, retry_metadata = self.llm_client.generate_json(correction_prompt)
 
             if self.debug:
                 print(f"\n  [debug] Raw LLM retry response:\n{raw_retry}\n")
 
+            # Aggregate metadata from both calls
+            aggregated["invocation_count"] = 2
+            aggregated["invoked"] = aggregated["invoked"] or retry_metadata.get("invoked", False)
+            
+            # Sum tokens
+            if retry_metadata.get("input_tokens") is not None:
+                if aggregated["input_tokens"] is not None:
+                    aggregated["input_tokens"] += retry_metadata["input_tokens"]
+                else:
+                    aggregated["input_tokens"] = retry_metadata["input_tokens"]
+            
+            if retry_metadata.get("output_tokens") is not None:
+                if aggregated["output_tokens"] is not None:
+                    aggregated["output_tokens"] += retry_metadata["output_tokens"]
+                else:
+                    aggregated["output_tokens"] = retry_metadata["output_tokens"]
+            
+            # Use max latency
+            retry_latency = retry_metadata.get("latency_ms")
+            if retry_latency is not None:
+                if aggregated["latency_ms"] is not None:
+                    aggregated["latency_ms"] = max(aggregated["latency_ms"], retry_latency)
+                else:
+                    aggregated["latency_ms"] = retry_latency
+
             try:
-                return LLMAnalysis.model_validate_json(raw_retry)
+                return LLMAnalysis.model_validate_json(raw_retry), aggregated
             except (ValidationError, ValueError):
-                return _make_fallback()
+                return _make_fallback(), aggregated

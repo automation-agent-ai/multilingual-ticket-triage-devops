@@ -92,6 +92,8 @@ class TicketTriageResponse(BaseModel):
 
     Returns the complete TriageResult with topic, urgency, next_action,
     confidence, flags, and action execution result.
+    
+    New in Phase 10C: inference field with real LLM metadata.
     """
 
     ticket_id: str
@@ -105,6 +107,10 @@ class TicketTriageResponse(BaseModel):
     requires_human_review: bool
     short_note: str
     action_result: dict[str, Any] | None = None
+    inference: dict[str, Any] | None = Field(
+        default=None,
+        description="Real inference metadata from the LLM provider (provider, model, region, tokens, latency)"
+    )
 
 
 class HealthResponse(BaseModel):
@@ -214,15 +220,17 @@ def _initialize_agent() -> TicketTriageAgent:
     from src.application.validator import TriageValidator
     from src.infrastructure.embedding_model import EmbeddingModel
     from src.infrastructure.lancedb_ticket_store import LanceDBTicketStore
-    from src.infrastructure.llm_client import OllamaClient
+    from src.infrastructure.llm_provider import create_llm_client, create_reviewer_client
 
     logger.info(f"Loading configuration from {CONFIG_PATH}")
     with open(CONFIG_PATH, "r", encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
 
-    # Override Ollama base URL from environment variable if set
+    # Override the Ollama base URL from the environment when the local
+    # provider is selected. Bedrock ignores this and uses the instance role.
     llm_cfg = cfg["llm"]
-    if OLLAMA_BASE_URL != "http://localhost:11434":
+    provider = str(llm_cfg.get("provider", "ollama")).strip().lower()
+    if provider == "ollama" and OLLAMA_BASE_URL != "http://localhost:11434":
         llm_cfg["base_url"] = OLLAMA_BASE_URL
         logger.info(f"Overriding LLM base_url to {OLLAMA_BASE_URL}")
 
@@ -242,13 +250,12 @@ def _initialize_agent() -> TicketTriageAgent:
     logger.info(f"  embedding dim : {embedding_model.get_dimension()}")
 
     # Initialize LLM client
-    logger.info(f"Initializing LLM client: {llm_cfg['model_name']}")
-    llm_client = OllamaClient(
-        base_url=llm_cfg["base_url"],
-        model_name=llm_cfg["model_name"],
-        temperature=llm_cfg.get("temperature", 0.1),
-        timeout_seconds=llm_cfg.get("timeout_seconds", 120),
+    logger.info(
+        "Initializing LLM client provider=%s model=%s",
+        provider,
+        llm_cfg.get("model_name"),
     )
+    llm_client = create_llm_client(llm_cfg)
 
     # Initialize vector store
     logger.info(f"Connecting to LanceDB: {vs_cfg['path']}/{vs_cfg['table_name']}")
@@ -282,12 +289,7 @@ def _initialize_agent() -> TicketTriageAgent:
     reviewer_cfg = cfg.get("reviewer", {})
     if reviewer_cfg.get("enabled", False):
         logger.info(f"Initializing reviewer: {reviewer_cfg['model_name']}")
-        reviewer_client = OllamaClient(
-            base_url=reviewer_cfg.get("base_url", llm_cfg["base_url"]),
-            model_name=reviewer_cfg["model_name"],
-            temperature=reviewer_cfg.get("temperature", 0.1),
-            timeout_seconds=llm_cfg.get("timeout_seconds", 120),
-        )
+        reviewer_client = create_reviewer_client(llm_cfg, reviewer_cfg)
         reviewer = ConditionalLLMReviewer(
             llm_client=reviewer_client,
             trigger_flags=reviewer_cfg.get("trigger_flags", []),
@@ -345,7 +347,7 @@ def _triage_result_to_response(result: TriageResult) -> TicketTriageResponse:
     """
     Convert TriageResult to HTTP response body.
 
-    Extracts enum values as strings and serializes action_result to dict.
+    Extracts enum values as strings and serializes action_result and inference to dict.
     """
     action_result_dict = None
     if result.action_result is not None:
@@ -354,6 +356,19 @@ def _triage_result_to_response(result: TriageResult) -> TicketTriageResponse:
             "action_status": result.action_result.action_status,
             "action_note": result.action_result.action_note,
             "target": result.action_result.target,
+        }
+
+    inference_dict = None
+    if result.inference is not None:
+        inference_dict = {
+            "provider": result.inference.provider,
+            "model": result.inference.model,
+            "region": result.inference.region,
+            "invoked": result.inference.invoked,
+            "input_tokens": result.inference.input_tokens,
+            "output_tokens": result.inference.output_tokens,
+            "latency_ms": result.inference.latency_ms,
+            "invocation_count": result.inference.invocation_count,
         }
 
     return TicketTriageResponse(
@@ -368,6 +383,7 @@ def _triage_result_to_response(result: TriageResult) -> TicketTriageResponse:
         requires_human_review=result.requires_human_review,
         short_note=result.short_note,
         action_result=action_result_dict,
+        inference=inference_dict,
     )
 
 

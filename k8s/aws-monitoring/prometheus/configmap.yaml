@@ -1,0 +1,49 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-config
+  namespace: triage-monitoring
+  labels:
+    app.kubernetes.io/component: prometheus
+    app.kubernetes.io/managed-by: kubectl
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 30s
+      evaluation_interval: 30s
+      external_labels:
+        cluster: 'aws-k3s'
+        region: 'us-east-1'
+
+    rule_files:
+      - /etc/prometheus/rules/*.yaml
+
+    scrape_configs:
+      # Prometheus self-monitoring
+      - job_name: 'prometheus'
+        static_configs:
+          - targets: ['localhost:9090']
+
+      # Ticket Triage DEV
+      - job_name: 'ticket-triage-dev'
+        metrics_path: /metrics
+        scrape_interval: 30s
+        static_configs:
+          - targets: ['ticket-triage.triage-dev.svc.cluster.local:8000']
+        relabel_configs:
+          - target_label: environment
+            replacement: dev
+          - target_label: app
+            replacement: ticket-triage
+
+      # Ticket Triage PROD
+      - job_name: 'ticket-triage-prod'
+        metrics_path: /metrics
+        scrape_interval: 30s
+        static_configs:
+          - targets: ['ticket-triage.triage-prod.svc.cluster.local:8000']
+        relabel_configs:
+          - target_label: environment
+            replacement: prod
+          - target_label: app
+            replacement: ticket-triage

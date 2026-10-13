@@ -7,6 +7,9 @@ PyYAML>=6.0,<7.0
 python-dotenv>=1.0,<2.0
 requests>=2.31,<3.0
 
+# Amazon Bedrock Converse API (used only when llm.provider is bedrock)
+boto3>=1.35.0,<2.0
+
 # Structured storage
 duckdb>=1.1,<2.0
 

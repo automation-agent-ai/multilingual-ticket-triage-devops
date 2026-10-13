@@ -1,0 +1,32 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: triage-monitoring
+
+resources:
+  # Namespace
+  - namespace.yaml
+  
+  # Prometheus
+  - prometheus/pvc.yaml
+  - prometheus/serviceaccount.yaml
+  - prometheus/configmap.yaml
+  - prometheus/alert-rules-configmap.yaml
+  - prometheus/deployment.yaml
+  - prometheus/service.yaml
+  
+  # Grafana
+  - grafana/pvc.yaml
+  - grafana/serviceaccount.yaml
+  - grafana/secret.yaml
+  - grafana/datasource-configmap.yaml
+  - grafana/dashboard-provider-configmap.yaml
+  - grafana/dashboard-configmap.yaml
+  - grafana/deployment.yaml
+  - grafana/service.yaml
+
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: multilingual-ticket-triage
+      environment: aws-production
+    includeSelectors: false

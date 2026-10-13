@@ -54,7 +54,7 @@ from src.infrastructure.duckdb_repository import DuckDBRepository
 from src.infrastructure.embedding_model import EmbeddingModel
 from src.infrastructure.evaluation_repository import EvaluationRepository
 from src.infrastructure.lancedb_ticket_store import LanceDBTicketStore
-from src.infrastructure.llm_client import OllamaClient
+from src.infrastructure.llm_provider import create_llm_client, create_reviewer_client
 from src.infrastructure.trace_writer import write_jsonl
 
 DB_PATH = "data/tickets.duckdb"
@@ -76,12 +76,7 @@ def build_agent_from_config(cfg: dict, embedding_model: EmbeddingModel) -> Ticke
     ret_cfg    = cfg["retrieval"]
     thresholds = cfg.get("thresholds", {})
 
-    llm_client = OllamaClient(
-        base_url=llm_cfg["base_url"],
-        model_name=llm_cfg["model_name"],
-        temperature=llm_cfg.get("temperature", 0.1),
-        timeout_seconds=llm_cfg.get("timeout_seconds", 120),
-    )
+    llm_client = create_llm_client(llm_cfg)
     store = LanceDBTicketStore(
         path=vs_cfg["path"],
         table_name=vs_cfg["table_name"],
@@ -107,12 +102,7 @@ def build_agent_from_config(cfg: dict, embedding_model: EmbeddingModel) -> Ticke
     reviewer = None
     reviewer_cfg = cfg.get("reviewer", {})
     if reviewer_cfg.get("enabled", False):
-        reviewer_client = OllamaClient(
-            base_url=reviewer_cfg.get("base_url", llm_cfg["base_url"]),
-            model_name=reviewer_cfg["model_name"],
-            temperature=reviewer_cfg.get("temperature", 0.1),
-            timeout_seconds=llm_cfg.get("timeout_seconds", 120),
-        )
+        reviewer_client = create_reviewer_client(llm_cfg, reviewer_cfg)
         reviewer = ConditionalLLMReviewer(
             llm_client=reviewer_client,
             trigger_flags=reviewer_cfg.get("trigger_flags", []),
@@ -195,6 +185,7 @@ def print_effective_run_config(cfg: dict, limit: int) -> None:
     reviewer_enabled = reviewer_cfg.get("enabled", False)
 
     print("\n  ── Effective Run Configuration ───────────────")
+    print(f"  llm provider     : {llm_cfg.get('provider', 'ollama')}")
     print(f"  analyzer model   : {llm_cfg.get('model_name', '')}")
     print(f"  reviewer enabled : {'Yes' if reviewer_enabled else 'No'}")
     if reviewer_enabled:
