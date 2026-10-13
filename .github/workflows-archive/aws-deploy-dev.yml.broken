@@ -1,0 +1,595 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# AWS DEV Deployment — k3s on EC2
+#
+# PURPOSE:
+#   Deploy a tested, immutable GHCR image to the AWS triage-dev namespace
+#   running on k3s (EC2 eu-west-1).
+#
+# TRIGGERS:
+#   1. workflow_run: after AWS Feature Image Build succeeds on feat/aws-bedrock-migration
+#   2. workflow_dispatch: manual trigger with explicit image tag
+#
+# DEPLOYMENT METHOD:
+#   GitHub-hosted runner → AWS OIDC → SSM Run Command → EC2 kubectl
+#
+# SECURITY MODEL:
+#   • Uses GitHub OIDC (no static AWS credentials)
+#   • IAM role: github-actions-aws-deployer (SSM + ECR read-only)
+#   • SSM Run Command restricted to specific EC2 instance
+#   • Deploys to triage-dev namespace only
+#   • Image must have passed Trivy scan in CI
+#
+# ISOLATION FROM WSL PIPELINE:
+#   • Workflow name: "AWS DEV Deployment" (distinct from "Deploy — DEV")
+#   • Runs on: ubuntu-latest (GitHub-hosted, NOT self-hosted)
+#   • Overlays: k8s/overlays/aws-dev (NOT k8s/ci-overlays/dev)
+#   • Trigger: AWS Feature Image Build (NOT "CI — Test · Build · Scan · Publish")
+#
+# PREREQUISITES (not yet configured):
+#   1. GitHub OIDC provider in AWS account
+#   2. IAM role: github-actions-aws-deployer with SSM permissions
+#   3. SSM Agent installed on EC2 instance
+#   4. EC2 instance role enhanced with AmazonSSMManagedInstanceCore
+#
+# CURRENT STATUS: PREPARED (not yet functional)
+# ──────────────────────────────────────────────────────────────────────────────
+
+name: AWS DEV Deployment
+
+on:
+  # Automatic: trigger after successful AWS feature branch build
+  workflow_run:
+    workflows: ["AWS Feature Image Build"]
+    types: [completed]
+    branches: [feat/aws-bedrock-migration]
+
+  # Manual: explicit image tag (for rollback or re-deployment)
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "GHCR image tag (aws-sha-<40-char> or aws-sha-<40-char>@sha256:...)"
+        required: true
+        default: ""
+      skip_smoke_test:
+        description: "Skip smoke test (for emergency rollback)"
+        type: boolean
+        required: false
+        default: false
+
+# Minimum default permissions
+permissions:
+  contents: read
+  id-token: write  # Required for OIDC authentication
+
+# Prevent concurrent deployments to DEV
+concurrency:
+  group: aws-dev-deployment
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: eu-west-1
+  EC2_INSTANCE_ID: i-07bc3aaf0d692974d
+  NAMESPACE: triage-dev
+  REGISTRY: ghcr.io
+  IMAGE_NAME: automation-agent-ai/multilingual-ticket-triage-devops
+  KUSTOMIZE_OVERLAY: k8s/overlays/aws-dev
+
+jobs:
+  # ────────────────────────────────────────────────────────────────────────────
+  # Job 1: Validate deployment preconditions
+  # ────────────────────────────────────────────────────────────────────────────
+  validate:
+    name: Validate Image and Prerequisites
+    runs-on: ubuntu-latest
+    
+    # Only run if workflow_run succeeded or manual trigger
+    if: >-
+      github.event_name == 'workflow_dispatch'
+      || github.event.workflow_run.conclusion == 'success'
+    
+    outputs:
+      image-tag: ${{ steps.resolve-tag.outputs.tag }}
+      image-ref: ${{ steps.resolve-tag.outputs.ref }}
+      previous-image: ${{ steps.get-current.outputs.image }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: feat/aws-bedrock-migration
+
+      # ── Resolve image tag ────────────────────────────────────────────────
+      - name: Resolve image tag
+        id: resolve-tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ inputs.image_tag }}"
+            if [ -z "$TAG" ]; then
+              echo "::error::image_tag must not be empty for manual dispatch"
+              exit 1
+            fi
+          else
+            # workflow_run: use SHA from triggering workflow
+            TAG="aws-sha-${{ github.event.workflow_run.head_sha }}"
+          fi
+          
+          # Extract base tag (remove digest if present)
+          BASE_TAG="${TAG%%@*}"
+          
+          # Construct full reference
+          REF="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${TAG}"
+          
+          echo "tag=${BASE_TAG}" >> "$GITHUB_OUTPUT"
+          echo "ref=${REF}" >> "$GITHUB_OUTPUT"
+          
+          echo "### Image Reference" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Tag: \`${BASE_TAG}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Ref: \`${REF}\`" >> "$GITHUB_STEP_SUMMARY"
+
+      # ── Validate tag format ──────────────────────────────────────────────
+      - name: Validate AWS image tag format
+        run: |
+          TAG="${{ steps.resolve-tag.outputs.tag }}"
+          if [[ ! "$TAG" =~ ^aws-sha-[0-9a-f]{40}$ ]]; then
+            echo "::error::Invalid AWS image tag format: '$TAG'"
+            echo "Expected: aws-sha-<40-hex-chars>"
+            exit 1
+          fi
+          echo "✅ Valid AWS image tag: $TAG"
+
+      # ── Verify image exists in GHCR ──────────────────────────────────────
+      - name: Verify image exists in GHCR
+        run: |
+          REF="${{ steps.resolve-tag.outputs.ref }}"
+          
+          # Use docker manifest inspect to check if image exists
+          # This works for public GHCR images without authentication
+          if docker manifest inspect "$REF" > /dev/null 2>&1; then
+            echo "✅ Image verified in GHCR: $REF"
+          else
+            echo "::error::Image not found in GHCR: $REF"
+            echo "Ensure the CI build completed successfully and pushed the image."
+            exit 1
+          fi
+
+      # ── Get current deployed image (for rollback) ────────────────────────
+      - name: Get current deployed image
+        id: get-current
+        run: |
+          # Read current image from kustomization.yaml
+          CURRENT_IMAGE=$(grep -A2 "^images:" "${{ env.KUSTOMIZE_OVERLAY }}/kustomization.yaml" \
+            | grep "newTag:" | awk '{print $2}')
+          
+          if [ -z "$CURRENT_IMAGE" ]; then
+            CURRENT_IMAGE="unknown"
+          fi
+          
+          echo "image=${CURRENT_IMAGE}" >> "$GITHUB_OUTPUT"
+          echo "Current DEV image: $CURRENT_IMAGE"
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # Job 2: Deploy to AWS DEV via SSM
+  # ────────────────────────────────────────────────────────────────────────────
+  deploy:
+    name: Deploy to AWS triage-dev
+    runs-on: ubuntu-latest
+    needs: validate
+    environment: aws-dev  # GitHub Environment for additional protection
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: feat/aws-bedrock-migration
+
+      # ── AWS Authentication via OIDC ──────────────────────────────────────
+      - name: Configure AWS credentials (OIDC)
+        id: aws-auth
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::523231704152:role/github-actions-aws-deployer
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: gh-actions-aws-dev-deploy-${{ github.run_id }}
+          # Output credentials for verification
+          mask-aws-account-id: false
+
+      - name: Verify AWS authentication
+        run: |
+          echo "### AWS Authentication" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Identity: \`$(aws sts get-caller-identity --query Arn --output text)\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Region: \`${{ env.AWS_REGION }}\`" >> "$GITHUB_STEP_SUMMARY"
+
+      # ── Verify SSM connectivity ──────────────────────────────────────────
+      - name: Verify EC2 instance is SSM-managed
+        run: |
+          PING_STATUS=$(aws ssm describe-instance-information \
+            --filters "Key=InstanceIds,Values=${{ env.EC2_INSTANCE_ID }}" \
+            --query 'InstanceInformationList[0].PingStatus' \
+            --output text)
+          
+          if [ "$PING_STATUS" != "Online" ]; then
+            echo "::error::EC2 instance is not online in SSM. Status: $PING_STATUS"
+            echo "Ensure SSM Agent is installed and the instance role includes AmazonSSMManagedInstanceCore."
+            exit 1
+          fi
+          
+          echo "✅ EC2 instance is SSM-managed and online"
+
+      # ── Prepare deployment script ────────────────────────────────────────
+      - name: Generate deployment script
+        id: script
+        run: |
+          cat > /tmp/deploy-dev.sh << 'DEPLOY_SCRIPT'
+          #!/bin/bash
+          set -euo pipefail
+          
+          IMAGE_REF="${1:-}"
+          NAMESPACE="${2:-triage-dev}"
+          OVERLAY_PATH="${3:-/home/ubuntu/workspaces/multilingual-ticket-triage-devops/k8s/overlays/aws-dev}"
+          
+          if [ -z "$IMAGE_REF" ]; then
+            echo "ERROR: IMAGE_REF not provided"
+            exit 1
+          fi
+          
+          echo "=== AWS DEV Deployment ==="
+          echo "Image: $IMAGE_REF"
+          echo "Namespace: $NAMESPACE"
+          echo "Overlay: $OVERLAY_PATH"
+          echo
+          
+          cd "$OVERLAY_PATH"
+          
+          # Record previous state for rollback
+          PREVIOUS_IMAGE=$(kubectl get deployment/ticket-triage -n "$NAMESPACE" \
+            -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || echo "none")
+          echo "Previous image: $PREVIOUS_IMAGE"
+          
+          # Update kustomization with new image (creates backup)
+          cp kustomization.yaml kustomization.yaml.backup
+          
+          # Use yq or sed to update the image tag
+          # For simplicity, using kustomize edit (requires kustomize CLI)
+          if ! command -v kustomize &>/dev/null; then
+            echo "Installing kustomize..."
+            cd /tmp
+            curl -sL "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv5.4.3/kustomize_v5.4.3_linux_amd64.tar.gz" \
+              | tar -xz
+            sudo mv kustomize /usr/local/bin/
+            cd "$OVERLAY_PATH"
+          fi
+          
+          kustomize edit set image "ticket-triage-api=${IMAGE_REF}"
+          
+          echo
+          echo "=== Updated kustomization.yaml ==="
+          grep -A4 "^images:" kustomization.yaml
+          echo
+          
+          # Apply to cluster
+          echo "=== Applying manifests ==="
+          kubectl apply -k .
+          
+          # Wait for rollout
+          echo
+          echo "=== Waiting for rollout ==="
+          if kubectl rollout status deployment/ticket-triage \
+              --namespace "$NAMESPACE" \
+              --timeout=300s; then
+            echo "✅ Rollout successful"
+          else
+            echo "❌ Rollout failed"
+            echo "Restoring previous kustomization..."
+            mv kustomization.yaml.backup kustomization.yaml
+            kubectl rollout undo deployment/ticket-triage --namespace "$NAMESPACE"
+            exit 1
+          fi
+          
+          # Verify image
+          ACTUAL_IMAGE=$(kubectl get deployment/ticket-triage -n "$NAMESPACE" \
+            -o jsonpath='{.spec.template.spec.containers[0].image}')
+          echo
+          echo "Deployed image: $ACTUAL_IMAGE"
+          
+          if [ "$ACTUAL_IMAGE" != "$IMAGE_REF" ]; then
+            echo "⚠️  WARNING: Deployed image doesn't match requested image"
+            exit 1
+          fi
+          
+          echo
+          echo "=== Deployment Summary ==="
+          kubectl get deployment/ticket-triage -n "$NAMESPACE" -o wide
+          kubectl get pods -n "$NAMESPACE" -l app=ticket-triage
+          
+          echo
+          echo "✅ Deployment complete"
+          DEPLOY_SCRIPT
+          
+          chmod +x /tmp/deploy-dev.sh
+          echo "script-path=/tmp/deploy-dev.sh" >> "$GITHUB_OUTPUT"
+
+      # ── Execute deployment via SSM ───────────────────────────────────────
+      - name: Deploy via SSM Run Command
+        id: ssm-deploy
+        run: |
+          IMAGE_REF="${{ needs.validate.outputs.image-ref }}"
+          
+          # Upload script to EC2 via SSM
+          COMMAND_ID=$(aws ssm send-command \
+            --instance-ids "${{ env.EC2_INSTANCE_ID }}" \
+            --document-name "AWS-RunShellScript" \
+            --parameters commands="$(cat /tmp/deploy-dev.sh)" \
+            --parameters commands="bash -s '$IMAGE_REF' '${{ env.NAMESPACE }}' '/home/ubuntu/workspaces/multilingual-ticket-triage-devops/${{ env.KUSTOMIZE_OVERLAY }}'" \
+            --comment "GitHub Actions AWS DEV deployment - run ${{ github.run_id }}" \
+            --timeout-seconds 600 \
+            --query 'Command.CommandId' \
+            --output text)
+          
+          echo "SSM Command ID: $COMMAND_ID"
+          echo "command-id=$COMMAND_ID" >> "$GITHUB_OUTPUT"
+          
+          # Wait for command completion
+          echo "Waiting for SSM command to complete..."
+          aws ssm wait command-executed \
+            --command-id "$COMMAND_ID" \
+            --instance-id "${{ env.EC2_INSTANCE_ID }}" \
+            --timeout 600 || true
+          
+          # Get command result
+          STATUS=$(aws ssm get-command-invocation \
+            --command-id "$COMMAND_ID" \
+            --instance-id "${{ env.EC2_INSTANCE_ID }}" \
+            --query 'Status' \
+            --output text)
+          
+          echo "Command status: $STATUS"
+          
+          # Get output
+          aws ssm get-command-invocation \
+            --command-id "$COMMAND_ID" \
+            --instance-id "${{ env.EC2_INSTANCE_ID }}" \
+            --query 'StandardOutputContent' \
+            --output text > /tmp/ssm-output.log
+          
+          cat /tmp/ssm-output.log
+          
+          if [ "$STATUS" != "Success" ]; then
+            echo "::error::SSM command failed with status: $STATUS"
+            
+            # Get error output
+            aws ssm get-command-invocation \
+              --command-id "$COMMAND_ID" \
+              --instance-id "${{ env.EC2_INSTANCE_ID }}" \
+              --query 'StandardErrorContent' \
+              --output text
+            
+            exit 1
+          fi
+          
+          echo "✅ Deployment via SSM succeeded"
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # Job 3: Smoke test via SSM
+  # ────────────────────────────────────────────────────────────────────────────
+  smoke-test:
+    name: Smoke Test AWS DEV
+    runs-on: ubuntu-latest
+    needs: [validate, deploy]
+    
+    # Skip if manual dispatch requested skip
+    if: >-
+      github.event_name != 'workflow_dispatch'
+      || inputs.skip_smoke_test != true
+    
+    steps:
+      # ── AWS Authentication ───────────────────────────────────────────────
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::523231704152:role/github-actions-aws-deployer
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: gh-actions-aws-dev-smoke-${{ github.run_id }}
+
+      # ── Health check ─────────────────────────────────────────────────────
+      - name: Smoke test - /health
+        id: health
+        run: |
+          COMMAND_ID=$(aws ssm send-command \
+            --instance-ids "${{ env.EC2_INSTANCE_ID }}" \
+            --document-name "AWS-RunShellScript" \
+            --parameters 'commands=POD=$(kubectl get pod -n ${{ env.NAMESPACE }} -l app=ticket-triage -o jsonpath=\"{.items[0].metadata.name}\"); kubectl exec $POD -n ${{ env.NAMESPACE }} -- curl -sf http://localhost:8000/health' \
+            --timeout-seconds 30 \
+            --query 'Command.CommandId' \
+            --output text)
+          
+          aws ssm wait command-executed \
+            --command-id "$COMMAND_ID" \
+            --instance-id "${{ env.EC2_INSTANCE_ID }}" \
+            --timeout 60 || true
+          
+          OUTPUT=$(aws ssm get-command-invocation \
+            --command-id "$COMMAND_ID" \
+            --instance-id "${{ env.EC2_INSTANCE_ID }}" \
+            --query 'StandardOutputContent' \
+            --output text)
+          
+          echo "$OUTPUT"
+          
+          if echo "$OUTPUT" | grep -q '"status":"ok"'; then
+            echo "✅ /health check passed"
+          else
+            echo "::error::/health check failed"
+            exit 1
+          fi
+
+      # ── Ready check ──────────────────────────────────────────────────────
+      - name: Smoke test - /ready
+        id: ready
+        run: |
+          COMMAND_ID=$(aws ssm send-command \
+            --instance-ids "${{ env.EC2_INSTANCE_ID }}" \
+            --document-name "AWS-RunShellScript" \
+            --parameters 'commands=POD=$(kubectl get pod -n ${{ env.NAMESPACE }} -l app=ticket-triage -o jsonpath=\"{.items[0].metadata.name}\"); kubectl exec $POD -n ${{ env.NAMESPACE }} -- curl -sf http://localhost:8000/ready' \
+            --timeout-seconds 30 \
+            --query 'Command.CommandId' \
+            --output text)
+          
+          aws ssm wait command-executed \
+            --command-id "$COMMAND_ID" \
+            --instance-id "${{ env.EC2_INSTANCE_ID }}" \
+            --timeout 60 || true
+          
+          OUTPUT=$(aws ssm get-command-invocation \
+            --command-id "$COMMAND_ID" \
+            --instance-id "${{ env.EC2_INSTANCE_ID }}" \
+            --query 'StandardOutputContent' \
+            --output text)
+          
+          echo "$OUTPUT"
+          
+          if echo "$OUTPUT" | grep -q '"ready":true'; then
+            echo "✅ /ready check passed"
+          else
+            echo "::error::/ready check failed - agent not initialized"
+            exit 1
+          fi
+
+      # ── Triage API test with Bedrock ─────────────────────────────────────
+      - name: Smoke test - POST /triage (Bedrock inference)
+        id: triage
+        run: |
+          # Create test payload
+          cat > /tmp/smoke-payload.json << 'EOF'
+          {
+            "ticket_id": "smoke-${{ github.run_id }}",
+            "subject": "Payment issue",
+            "body": "I was charged twice for the same subscription. Please refund.",
+            "language": "en"
+          }
+          EOF
+          
+          # Encode payload for SSM
+          PAYLOAD_B64=$(base64 -w0 /tmp/smoke-payload.json)
+          
+          COMMAND_ID=$(aws ssm send-command \
+            --instance-ids "${{ env.EC2_INSTANCE_ID }}" \
+            --document-name "AWS-RunShellScript" \
+            --parameters "commands=POD=\$(kubectl get pod -n ${{ env.NAMESPACE }} -l app=ticket-triage -o jsonpath='{.items[0].metadata.name}'); echo '$PAYLOAD_B64' | base64 -d > /tmp/smoke.json; kubectl exec \$POD -n ${{ env.NAMESPACE }} -- curl -sf -X POST http://localhost:8000/triage -H 'Content-Type: application/json' -d @/tmp/smoke.json" \
+            --timeout-seconds 60 \
+            --query 'Command.CommandId' \
+            --output text)
+          
+          aws ssm wait command-executed \
+            --command-id "$COMMAND_ID" \
+            --instance-id "${{ env.EC2_INSTANCE_ID }}" \
+            --timeout 120 || true
+          
+          OUTPUT=$(aws ssm get-command-invocation \
+            --command-id "$COMMAND_ID" \
+            --instance-id "${{ env.EC2_INSTANCE_ID }}" \
+            --query 'StandardOutputContent' \
+            --output text)
+          
+          echo "$OUTPUT"
+          
+          # Verify response structure
+          if echo "$OUTPUT" | grep -q '"ticket_id"'; then
+            echo "✅ POST /triage returned valid response"
+          else
+            echo "::error::POST /triage failed or returned invalid response"
+            exit 1
+          fi
+          
+          # Verify Bedrock metadata
+          if echo "$OUTPUT" | grep -q '"model_id"'; then
+            echo "✅ Bedrock inference metadata present"
+            MODEL_ID=$(echo "$OUTPUT" | grep -o '"model_id":"[^"]*"' | cut -d'"' -f4)
+            echo "Model used: $MODEL_ID"
+          else
+            echo "⚠️  Bedrock metadata not found in response"
+          fi
+          
+          # Save response for summary
+          echo "$OUTPUT" > /tmp/triage-response.json
+
+      # ── Job Summary ──────────────────────────────────────────────────────
+      - name: Write smoke test summary
+        if: always()
+        run: |
+          {
+            echo "### 🧪 Smoke Test Results"
+            echo ""
+            echo "| Endpoint | Status |"
+            echo "|---|---|"
+            echo "| GET /health | ${{ steps.health.outcome == 'success' && '✅' || '❌' }} |"
+            echo "| GET /ready | ${{ steps.ready.outcome == 'success' && '✅' || '❌' }} |"
+            echo "| POST /triage | ${{ steps.triage.outcome == 'success' && '✅' || '❌' }} |"
+            echo ""
+            
+            if [ -f /tmp/triage-response.json ]; then
+              echo "<details>"
+              echo "<summary>Triage API Response (click to expand)</summary>"
+              echo ""
+              echo "\`\`\`json"
+              cat /tmp/triage-response.json | head -50
+              echo "\`\`\`"
+              echo "</details>"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # Job 4: Deployment summary
+  # ────────────────────────────────────────────────────────────────────────────
+  summary:
+    name: Deployment Summary
+    runs-on: ubuntu-latest
+    needs: [validate, deploy, smoke-test]
+    if: always()
+    
+    steps:
+      - name: Generate deployment summary
+        run: |
+          {
+            echo "## 🚀 AWS DEV Deployment Complete"
+            echo ""
+            echo "### Deployment Details"
+            echo "| Field | Value |"
+            echo "|---|---|"
+            echo "| Image | \`${{ needs.validate.outputs.image-ref }}\` |"
+            echo "| Tag | \`${{ needs.validate.outputs.image-tag }}\` |"
+            echo "| Previous | \`${{ needs.validate.outputs.previous-image }}\` |"
+            echo "| Namespace | \`${{ env.NAMESPACE }}\` |"
+            echo "| Region | \`${{ env.AWS_REGION }}\` |"
+            echo "| Instance | \`${{ env.EC2_INSTANCE_ID }}\` |"
+            echo "| Overlay | \`${{ env.KUSTOMIZE_OVERLAY }}\` |"
+            echo "| Triggered by | \`${{ github.actor }}\` |"
+            echo "| Run ID | [\`${{ github.run_id }}\`](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) |"
+            echo ""
+            echo "### Job Status"
+            echo "| Job | Status |"
+            echo "|---|---|"
+            echo "| Validate | ${{ needs.validate.result }} |"
+            echo "| Deploy | ${{ needs.deploy.result }} |"
+            echo "| Smoke Test | ${{ needs.smoke-test.result }} |"
+            echo ""
+            
+            if [ "${{ needs.deploy.result }}" = "success" ] && [ "${{ needs.smoke-test.result }}" = "success" ]; then
+              echo "### ✅ Deployment Successful"
+              echo ""
+              echo "The new image is running in AWS DEV and all smoke tests passed."
+              echo ""
+              echo "**Next steps:**"
+              echo "1. Verify application behavior in DEV: https://triage.automation-agent.ai/docs"
+              echo "2. Check Grafana metrics: https://grafana.automation-agent.ai"
+              echo "3. When ready, promote to PROD via AWS PROD Promotion workflow"
+            else
+              echo "### ❌ Deployment Issues"
+              echo ""
+              echo "Review the job logs above for details."
+              
+              if [ "${{ needs.deploy.result }}" = "failure" ]; then
+                echo ""
+                echo "**Rollback**: The deployment script automatically rolled back to the previous image."
+              fi
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
