@@ -1,0 +1,31 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-rules
+  namespace: triage-monitoring
+  labels:
+    app.kubernetes.io/component: prometheus
+    app.kubernetes.io/managed-by: kubectl
+data:
+  alerts.yaml: |
+    groups:
+      - name: ticket-triage
+        interval: 30s
+        rules:
+          - alert: TicketTriageDown
+            expr: up{job=~"ticket-triage.*"} == 0
+            for: 2m
+            labels:
+              severity: critical
+            annotations:
+              summary: "Ticket Triage {{ $labels.job }} is down"
+              description: "Target {{ $labels.job }} has been down for more than 2 minutes."
+
+          - alert: HighErrorRate
+            expr: rate(http_requests_total{status_code=~"5..", job=~"ticket-triage.*"}[5m]) > 0.01
+            for: 5m
+            labels:
+              severity: warning
+            annotations:
+              summary: "High 5xx error rate in {{ $labels.job }}"
+              description: "{{ $labels.job }} is returning {{ $value }} 5xx errors per second."

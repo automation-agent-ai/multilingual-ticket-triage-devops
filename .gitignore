@@ -75,3 +75,26 @@ backups/
 # Generated runner kubeconfig — contains a bearer token, never commit
 runner-kubeconfig.yaml
 *-kubeconfig.yaml
+
+# Backup secrets and credentials
+**/restic-password*
+**/backup-*.env
+/etc/liora-backup/
+
+# Terraform sensitive files
+infra/**/*.tfvars
+!infra/**/*.tfvars.example
+infra/**/.terraform/
+infra/**/*.tfstate
+infra/**/*.tfstate.*
+infra/**/crash.log
+infra/**/crash.*.log
+infra/**/*.tfplan
+
+# Operations secrets
+ops/**/*.env
+ops/**/secrets/
+ops/**/*password*
+ops/**/*secret*
+ops/**/*.key
+ops/**/*.pem

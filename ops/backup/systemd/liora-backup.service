@@ -1,0 +1,44 @@
+[Unit]
+Description=Liora Ticket Triage Application Backup to S3
+Documentation=https://github.com/automation-agent-ai/multilingual-ticket-triage-devops
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/phase11-backup-implementation/scripts
+
+# Main backup script
+ExecStart=/home/ubuntu/phase11-backup-implementation/scripts/backup-to-s3.sh
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=liora-backup
+
+# Resource limits
+TimeoutStartSec=30min
+MemoryMax=1G
+
+# Restart behavior (retry once on failure after 5 minutes)
+Restart=on-failure
+RestartSec=5min
+StartLimitBurst=1
+StartLimitIntervalSec=1h
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/log /tmp
+
+# Environment
+Environment="REPO_ROOT=/home/ubuntu/workspaces/multilingual-ticket-triage-devops"
+Environment="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+Environment="AWS_REGION=eu-west-1"
+
+[Install]
+WantedBy=multi-user.target
