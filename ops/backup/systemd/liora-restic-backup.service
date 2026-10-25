@@ -1,52 +1,41 @@
 [Unit]
 Description=Liora Restic Backup to Local EBS
 Documentation=https://github.com/automation-agent-ai/multilingual-ticket-triage-devops
+StartLimitBurst=1
+StartLimitIntervalSec=1h
+OnSuccess=liora-restic-offsite-copy.service
 
 [Service]
 Type=oneshot
 User=ubuntu
 Group=ubuntu
+RuntimeDirectory=liora-restic-backup
+RuntimeDirectoryMode=0700
 WorkingDirectory=/home/ubuntu/phase11-backup-implementation/scripts
 
-# Main backup script
 ExecStart=/home/ubuntu/phase11-backup-implementation/scripts/restic-backup.sh
 
-# Logging
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=liora-restic-backup
 
-# Resource limits
 TimeoutStartSec=30min
 MemoryMax=2G
+Restart=no
 
-# Restart behavior (retry once on failure after 5 minutes)
-Restart=on-failure
-RestartSec=5min
-StartLimitBurst=1
-StartLimitIntervalSec=1h
-
-# Security hardening
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 
-# File system access (explicit paths required with ProtectSystem=strict)
-# READ access for source data and scripts
 ReadOnlyPaths=/home/ubuntu/workspaces
 ReadOnlyPaths=/home/ubuntu/phase11-backup-implementation
-# READ access for password file
 ReadOnlyPaths=/etc/liora-backup
-# WRITE access for staging, locks, and backup repository
 ReadWritePaths=/tmp
 ReadWritePaths=/var/run
 ReadWritePaths=/var/backups/liora-restic
 
-# Environment
 Environment="REPO_ROOT=/home/ubuntu/workspaces/multilingual-ticket-triage-devops"
 Environment="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-
-# Restic configuration (Local EBS filesystem repository)
 Environment="RESTIC_REPOSITORY=/var/backups/liora-restic"
 Environment="RESTIC_PASSWORD_FILE=/etc/liora-backup/restic-password"
 

@@ -23,7 +23,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="${REPO_ROOT:-/home/ubuntu/workspaces/multilingual-ticket-triage-devops}"
 TIMESTAMP=$(date -u +%Y%m%dT%H%M%SZ)
 STAGING_DIR="/tmp/liora-restic-staging-${TIMESTAMP}"
-LOCK_FILE="/var/run/liora-restic-backup.lock"
+LOCK_FILE="/run/liora-restic-backup/backup.lock"
 
 # Logging: Use stderr for systemd journald, fallback to file for manual runs
 if [ -t 1 ]; then
@@ -38,18 +38,67 @@ fi
 RESTIC_REPOSITORY="${RESTIC_REPOSITORY:-}"
 RESTIC_PASSWORD_FILE="${RESTIC_PASSWORD_FILE:-/etc/liora-backup/restic-password}"
 RESTIC_BACKUP_PATH="/liora-backup/data"  # Logical path in repository
+RESTIC_SNAPSHOT_HOST="${RESTIC_SNAPSHOT_HOST:-liora-aws-ec2}"
+
+# Retention prune (forget/prune) is disabled by default until off-host backups and
+# retention policy are validated (Sprint F01.2c). Set to 1 to enable the block in restic_prune().
+LIORA_RESTIC_ENABLE_RETENTION_PRUNE="${LIORA_RESTIC_ENABLE_RETENTION_PRUNE:-0}"
 
 # Python helpers
 PREPARE_SCRIPT="${SCRIPT_DIR}/prepare-backup-data.py"
 VENV_PYTHON="${REPO_ROOT}/.venv/bin/python"
 
 # ── Logging ───────────────────────────────────────────────────────────────────
+pipe_to_log() {
+    if [[ "${LOG_FILE}" == "/dev/stderr" ]]; then
+        cat >&2
+    else
+        tee -a "${LOG_FILE}"
+    fi
+}
+
 log() {
-    echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*" | tee -a "${LOG_FILE}"
+    local msg="[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*"
+    if [[ "${LOG_FILE}" == "/dev/stderr" ]]; then
+        echo "$msg" >&2
+    else
+        echo "$msg" | tee -a "${LOG_FILE}"
+    fi
 }
 
 log_error() {
-    echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] ERROR: $*" | tee -a "${LOG_FILE}" >&2
+    local msg="[$(date -u +%Y-%m-%dT%H:%M:%SZ)] ERROR: $*"
+    if [[ "${LOG_FILE}" == "/dev/stderr" ]]; then
+        echo "$msg" >&2
+    else
+        echo "$msg" | tee -a "${LOG_FILE}" >&2
+    fi
+}
+
+# Newest automated snapshot on this host (by timestamp, not array order).
+get_newest_automated_snapshot_json() {
+    restic snapshots --json --host "${RESTIC_SNAPSHOT_HOST}" --tag automated 2>/dev/null \
+        | jq -c 'if length == 0 then null else max_by(.time) end' 2>/dev/null \
+        || echo "null"
+}
+
+get_newest_automated_snapshot_time() {
+    get_newest_automated_snapshot_json | jq -r 'if . == null then empty else .time end' 2>/dev/null || true
+}
+
+format_newest_automated_snapshot_summary() {
+    local snap_json
+    snap_json=$(get_newest_automated_snapshot_json)
+    if [ -z "${snap_json}" ] || [ "${snap_json}" = "null" ]; then
+        echo "No automated snapshots found for host ${RESTIC_SNAPSHOT_HOST}"
+        return 0
+    fi
+    echo "${snap_json}" | jq -r '
+        "ID: \(.short_id)",
+        "Time: \(.time)",
+        "Host: \(.hostname)",
+        "Tags: \(.tags | join(", "))"
+    ' 2>/dev/null || echo "Unable to parse snapshot info"
 }
 
 # ── Lock Management ───────────────────────────────────────────────────────────
@@ -120,7 +169,7 @@ prepare_data() {
     log "[1/5] Preparing consistent data snapshot..."
     
     # Run Python preparation script
-    if "${VENV_PYTHON}" "${PREPARE_SCRIPT}" "${STAGING_DIR}" 2>&1 | tee -a "${LOG_FILE}"; then
+    if "${VENV_PYTHON}" "${PREPARE_SCRIPT}" "${STAGING_DIR}" 2>&1 | pipe_to_log; then
         log "✓ Data preparation complete"
     else
         log_error "Data preparation failed"
@@ -150,7 +199,7 @@ restic_backup() {
         --tag "automated" \
         --tag "$(date +%Y-%m-%d)" \
         --host "liora-aws-ec2" \
-        --json 2>&1 | tee -a "${LOG_FILE}"; then
+        --json 2>&1 | pipe_to_log; then
         log "✓ Restic backup complete"
     else
         log_error "Restic backup failed"
@@ -164,6 +213,12 @@ restic_prune() {
     
     export RESTIC_REPOSITORY
     export RESTIC_PASSWORD_FILE
+
+    if [ "${LIORA_RESTIC_ENABLE_RETENTION_PRUNE}" != "1" ]; then
+        log "Retention prune disabled (LIORA_RESTIC_ENABLE_RETENTION_PRUNE=${LIORA_RESTIC_ENABLE_RETENTION_PRUNE})."
+        log "Skipping restic forget/prune until off-host backup and retention policy are validated."
+        return 0
+    fi
     
     # SAFETY CHECK: Count snapshots before pruning
     SNAPSHOT_COUNT=$(restic snapshots --json --host "liora-aws-ec2" | jq '. | length' 2>/dev/null || echo "0")
@@ -175,8 +230,8 @@ restic_prune() {
         return 0
     fi
     
-    # SAFETY CHECK: Verify latest snapshot is from THIS backup run
-    LATEST_SNAPSHOT_TIME=$(restic snapshots --json --host "liora-aws-ec2" --last | jq -r '.[0].time' 2>/dev/null || echo "")
+    # SAFETY CHECK: Verify newest automated snapshot is from THIS backup run
+    LATEST_SNAPSHOT_TIME=$(get_newest_automated_snapshot_time)
     if [ -z "${LATEST_SNAPSHOT_TIME}" ]; then
         log "WARNING: Could not verify latest snapshot - skipping prune for safety"
         return 0
@@ -197,7 +252,7 @@ restic_prune() {
     if restic forget \
         --keep-last 7 \
         --prune \
-        --host "liora-aws-ec2" 2>&1 | tee -a "${LOG_FILE}"; then
+        --host "liora-aws-ec2" 2>&1 | pipe_to_log; then
         log "✓ Pruning complete"
         
         # Log new snapshot count
@@ -216,7 +271,7 @@ restic_check() {
     export RESTIC_PASSWORD_FILE
     
     # Quick check (don't read all data)
-    if restic check --read-data-subset=1% 2>&1 | tee -a "${LOG_FILE}"; then
+    if restic check --read-data-subset=1% 2>&1 | pipe_to_log; then
         log "✓ Repository check passed"
     else
         log "WARNING: Repository check failed (non-fatal)"
@@ -240,22 +295,10 @@ backup_summary() {
     export RESTIC_REPOSITORY
     export RESTIC_PASSWORD_FILE
     
-    # Get latest snapshot info
-    LATEST_SNAPSHOT=$(restic snapshots --last --json | python3 -c "
-import sys, json
-try:
-    data = json.load(sys.stdin)
-    if data:
-        snap = data[0]
-        print(f\"ID: {snap['short_id']}\")
-        print(f\"Time: {snap['time']}\")
-        print(f\"Host: {snap['hostname']}\")
-        print(f\"Tags: {', '.join(snap.get('tags', []))}\")
-except:
-    print('Unable to parse snapshot info')
-" 2>/dev/null || echo "Unable to fetch snapshot info")
-    
-    log "${LATEST_SNAPSHOT}"
+    LATEST_SNAPSHOT=$(format_newest_automated_snapshot_summary)
+    while IFS= read -r line; do
+        log "${line}"
+    done <<< "${LATEST_SNAPSHOT}"
     log "✓ Backup completed successfully"
 }
 
