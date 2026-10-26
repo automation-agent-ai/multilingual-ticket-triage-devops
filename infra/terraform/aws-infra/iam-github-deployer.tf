@@ -18,16 +18,11 @@ data "aws_iam_policy_document" "github_actions_assume_role" {
       values   = ["sts.amazonaws.com"]
     }
 
-    # Environment-based access (Phase 13B requirement)
-    # GitHub workflows use `environment: aws-dev` and `environment: aws-prod`
-    # which changes OIDC subject from branch-based to environment-based
+    # Environment-based access with GitHub immutable OIDC subjects (owner/repo numeric IDs).
     condition {
-      test     = "StringLike"
+      test     = "StringEquals"
       variable = "token.actions.githubusercontent.com:sub"
-      values = [
-        "repo:${var.github_repository}:environment:aws-dev",
-        "repo:${var.github_repository}:environment:aws-prod"
-      ]
+      values   = var.github_oidc_environment_subjects
     }
   }
 }
@@ -47,12 +42,6 @@ data "aws_iam_policy_document" "github_actions_permissions" {
       "arn:aws:ssm:${var.aws_region}::document/AWS-RunShellScript",
       "arn:aws:ec2:${var.aws_region}:${data.aws_caller_identity.current.account_id}:instance/${var.ec2_instance_id}"
     ]
-
-    condition {
-      test     = "StringEquals"
-      variable = "ssm:resourceTag/Environment"
-      values   = ["production", "staging"]
-    }
   }
 
   # SSM Get Command Results
@@ -61,8 +50,7 @@ data "aws_iam_policy_document" "github_actions_permissions" {
     effect = "Allow"
 
     actions = [
-      "ssm:GetCommandInvocation",
-      "ssm:ListCommandInvocations"
+      "ssm:GetCommandInvocation"
     ]
 
     resources = ["*"]

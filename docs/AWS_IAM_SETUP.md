@@ -20,6 +20,28 @@ This document provides the exact IAM configuration required for GitHub Actions t
 - AWS Region: `eu-west-1`
 - EC2 Instance ID: `i-07bc3aaf0d692974d`
 
+### GitHub immutable OIDC subjects (required for this repository)
+
+This repository uses GitHub’s **immutable** OIDC `sub` claims (owner and repository numeric IDs). Verify with:
+
+```bash
+gh api repos/automation-agent-ai/multilingual-ticket-triage-devops/actions/oidc/customization/sub
+```
+
+Expected: `use_immutable_subject: true` and a `sub_claim_prefix` like  
+`repo:automation-agent-ai@212631714/multilingual-ticket-triage-devops@1413133651`.
+
+For workflows that set `environment: aws-dev` or `environment: aws-prod`, the IAM trust policy must allow these **exact** `sub` values (use `StringEquals`, not wildcards):
+
+| GitHub Environment | `token.actions.githubusercontent.com:sub` |
+|--------------------|-------------------------------------------|
+| `aws-dev` | `repo:automation-agent-ai@212631714/multilingual-ticket-triage-devops@1413133651:environment:aws-dev` |
+| `aws-prod` | `repo:automation-agent-ai@212631714/multilingual-ticket-triage-devops@1413133651:environment:aws-prod` |
+
+The legacy name-only format (`repo:org/repo:environment:…`) does **not** match tokens from this repository.
+
+Canonical Terraform defaults: `infra/terraform/aws-infra/variables.tf` (`github_oidc_environment_subjects`).
+
 ---
 
 ## Step 1: Create GitHub OIDC Provider
@@ -83,8 +105,8 @@ Create `github-actions-trust-policy.json`:
         "StringEquals": {
           "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
           "token.actions.githubusercontent.com:sub": [
-            "repo:automation-agent-ai/multilingual-ticket-triage-devops:environment:aws-dev",
-            "repo:automation-agent-ai/multilingual-ticket-triage-devops:environment:aws-prod"
+            "repo:automation-agent-ai@212631714/multilingual-ticket-triage-devops@1413133651:environment:aws-dev",
+            "repo:automation-agent-ai@212631714/multilingual-ticket-triage-devops@1413133651:environment:aws-prod"
           ]
         }
       }
@@ -96,15 +118,15 @@ Create `github-actions-trust-policy.json`:
 **Trust policy breakdown:**
 - `Federated`: GitHub OIDC provider ARN
 - `aud`: Must be `sts.amazonaws.com` (AWS STS audience)
-- `sub`: **Environment-based OIDC subject claims**
-  - `repo:<org>/<repo>:environment:<environment-name>`
-  - When workflow uses `environment: aws-dev`, subject is `repo:...:environment:aws-dev`
+- `sub`: **Environment-based OIDC subject claims (immutable ID format for this repo)**
+  - `repo:<org>@<owner-id>/<repo>@<repo-id>:environment:<environment-name>`
+  - When workflow uses `environment: aws-dev`, subject must match the immutable `aws-dev` string in the table above
   - More secure than branch-based claims
   - **Blocks all non-environment jobs and forks**
 
 **IMPORTANT:** GitHub OIDC subject format changes when using environments:
-- **Without environment:** `repo:...:ref:refs/heads/<branch>`
-- **With environment:** `repo:...:environment:<environment-name>`
+- **Without environment:** `repo:...:ref:refs/heads/<branch>` (immutable repos still include `@` IDs in the prefix)
+- **With environment:** `repo:...@.../...@...:environment:<environment-name>`
 
 See: https://docs.github.com/en/actions/deployment/security-hardening-your-deployments/about-security-hardening-with-openid-connect#understanding-the-oidc-token
 
@@ -125,22 +147,13 @@ Create `github-actions-permissions-policy.json`:
       "Resource": [
         "arn:aws:ssm:eu-west-1::document/AWS-RunShellScript",
         "arn:aws:ec2:eu-west-1:523231704152:instance/i-07bc3aaf0d692974d"
-      ],
-      "Condition": {
-        "StringEquals": {
-          "ssm:resourceTag/Environment": [
-            "production",
-            "staging"
-          ]
-        }
-      }
+      ]
     },
     {
       "Sid": "SSMGetCommandResults",
       "Effect": "Allow",
       "Action": [
-        "ssm:GetCommandInvocation",
-        "ssm:ListCommandInvocations"
+        "ssm:GetCommandInvocation"
       ],
       "Resource": "*",
       "Condition": {
@@ -170,8 +183,8 @@ Create `github-actions-permissions-policy.json`:
 
 | Action | Resource | Condition | Rationale |
 |--------|----------|-----------|-----------|
-| `ssm:SendCommand` | AWS-RunShellScript document | Instance must have Environment tag | Execute deployment scripts |
-| `ssm:SendCommand` | Specific instance only | | Restricted to k3s EC2 |
+| `ssm:SendCommand` | AWS-RunShellScript document | None (scoped by resource ARN) | Execute deployment scripts |
+| `ssm:SendCommand` | Specific instance only | | Restricted to k3s EC2 (`i-07bc3aaf0d692974d`) |
 | `ssm:GetCommandInvocation` | Any command | Region: eu-west-1 | Read deployment results |
 | `ssm:DescribeInstanceInformation` | Any instance | Region: eu-west-1 | Verify SSM connectivity |
 
@@ -448,14 +461,13 @@ Repository → Settings → Environments → New environment
 
 ### IAM Role: github-actions-aws-deployer
 - [ ] Role exists
-- [ ] Trust policy allows GitHub repo
-- [ ] Trust policy restricts to specific branches
+- [ ] Trust policy allows this repository’s immutable `sub` for `aws-dev` and `aws-prod` only
+- [ ] Trust policy uses `StringEquals` on `sub` (no wildcards)
 - [ ] Permissions include `ssm:SendCommand` for specific instance
 - [ ] Permissions include `ssm:GetCommandInvocation`
 - [ ] No admin or destructive permissions
 
 ### EC2 Instance
-- [ ] Tagged with `Environment=production`
 - [ ] Instance role has `AmazonSSMManagedInstanceCore`
 - [ ] SSM Agent installed and running
 - [ ] Instance shows "Online" in SSM console
@@ -515,7 +527,28 @@ jobs:
 
 ## Terraform Alternative
 
-If using Terraform to manage IAM:
+If using Terraform to manage IAM, use the modules under `infra/terraform/aws-infra/` (IAM, OIDC, EC2 role attachments). Source of truth for trust and `SSMDeploymentPolicy` JSON is the `.tf` files, not the manual CLI snippets above.
+
+### Terraform state — outstanding work (as of G07.14/G07.15)
+
+Live IAM resources were created manually and are **not** yet recorded in remote Terraform state:
+
+| Resource | Import ID (after state backend exists) |
+|----------|----------------------------------------|
+| GitHub OIDC provider | `arn:aws:iam::523231704152:oidc-provider/token.actions.githubusercontent.com` |
+| `github-actions-aws-deployer` role | `github-actions-aws-deployer` |
+| Inline `SSMDeploymentPolicy` | `github-actions-aws-deployer:SSMDeploymentPolicy` |
+| `AmazonSSMManagedInstanceCore` on EC2 role | `liora-triage-bedrock-role/arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore` |
+| `ResticBackupPolicy` (if present in IAM) | `liora-triage-bedrock-role:ResticBackupPolicy` |
+
+**State bucket:** `liora-terraform-state-523231704152` (configured in `infra/terraform/aws-infra/backend.tf`) was **not** present at reconciliation time. Before `terraform import` or `terraform apply`:
+
+1. Create and secure the S3 state bucket (versioning, encryption) per `infra/terraform/README.md`.
+2. Run `terraform init` in `aws-infra/` with the S3 backend.
+3. Import existing resources, then `terraform plan` until no unexpected creates/replaces.
+4. Repeat for `infra/terraform/aws-restic/` if the Restic bucket was created outside Terraform.
+
+**Not authorized in G07.15:** `terraform apply`, `import`, `destroy`, or S3 bucket creation from automation—schedule in a dedicated sprint with explicit approval.
 
 ### Provider configuration
 
@@ -581,10 +614,7 @@ data "aws_iam_policy_document" "github_actions_assume_role" {
     condition {
       test     = "StringEquals"
       variable = "token.actions.githubusercontent.com:sub"
-      values = [
-        "repo:automation-agent-ai/multilingual-ticket-triage-devops:environment:aws-dev",
-        "repo:automation-agent-ai/multilingual-ticket-triage-devops:environment:aws-prod"
-      ]
+      values   = var.github_oidc_environment_subjects
     }
   }
 }
@@ -602,12 +632,6 @@ data "aws_iam_policy_document" "github_actions_permissions" {
       "arn:aws:ssm:eu-west-1::document/AWS-RunShellScript",
       "arn:aws:ec2:eu-west-1:523231704152:instance/i-07bc3aaf0d692974d"
     ]
-    
-    condition {
-      test     = "StringEquals"
-      variable = "ssm:resourceTag/Environment"
-      values   = ["production", "staging"]
-    }
   }
   
   statement {
@@ -615,8 +639,7 @@ data "aws_iam_policy_document" "github_actions_permissions" {
     effect = "Allow"
     
     actions = [
-      "ssm:GetCommandInvocation",
-      "ssm:ListCommandInvocations"
+      "ssm:GetCommandInvocation"
     ]
     
     resources = ["*"]

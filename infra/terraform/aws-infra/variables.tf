@@ -41,9 +41,25 @@ variable "iam_role_name" {
 }
 
 variable "github_repository" {
-  description = "GitHub repository for OIDC trust policy"
+  description = "GitHub repository slug (tags and documentation; OIDC trust uses immutable sub claims)"
   type        = string
   default     = "automation-agent-ai/multilingual-ticket-triage-devops"
+}
+
+# GitHub Actions OIDC subject claims (immutable owner/repo IDs).
+# Must match GET .../actions/oidc/customization/sub and live IAM trust policy.
+variable "github_oidc_environment_subjects" {
+  description = "Exact token.actions.githubusercontent.com:sub values for aws-dev and aws-prod"
+  type        = list(string)
+  default = [
+    "repo:automation-agent-ai@212631714/multilingual-ticket-triage-devops@1413133651:environment:aws-dev",
+    "repo:automation-agent-ai@212631714/multilingual-ticket-triage-devops@1413133651:environment:aws-prod",
+  ]
+
+  validation {
+    condition     = length(var.github_oidc_environment_subjects) == 2
+    error_message = "Exactly two environment OIDC subject claims are required (aws-dev and aws-prod)."
+  }
 }
 
 variable "common_tags" {
