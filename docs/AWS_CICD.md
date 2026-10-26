@@ -2,33 +2,50 @@
 
 ## Overview
 
-This document describes the complete GitHub Actions CI/CD pipeline for deploying the Liora Multilingual Ticket Triage API to AWS k3s infrastructure.
+This document describes the complete GitHub Actions CI/CD pipeline for deploying the Multilingual Ticket Triage API to AWS EC2 k3s infrastructure with Amazon Bedrock integration.
 
-**Pipeline Flow:**
+**Verified deployment:** DEV environment on AWS k3s, validated 2026-10-26 before [PR #4](https://github.com/automation-agent-ai/multilingual-ticket-triage-devops/pull/4) merge.  
+**Repository:** [automation-agent-ai/multilingual-ticket-triage-devops](https://github.com/automation-agent-ai/multilingual-ticket-triage-devops)  
+**Evidence:** [AWS CI run 40256053016](https://github.com/automation-agent-ai/multilingual-ticket-triage-devops/actions/runs/40256053016) — pytest ✅, Trivy ✅, DEV deploy ✅
+
+### Operational status (defense summary)
+
+| Item | Status |
+|------|--------|
+| AWS DEV automated deploy (`aws-ci-cd.yml` → `triage-dev`) | ✅ Verified ([40256053016](https://github.com/automation-agent-ai/multilingual-ticket-triage-devops/actions/runs/40256053016)) |
+| AWS `triage-prod` workload (`/health`) | ✅ Healthy on cluster (pre-existing image) |
+| Automated PROD promotion (`aws-prod-promote.yml` / PROD jobs) | ❌ **Not verified** — not executed end-to-end |
+| GitHub Environment `aws-prod` required reviewers | ⚠️ **Incomplete** |
+| Push to `main` → AWS deploy | ❌ **No** — use feature-branch AWS workflow or manual dispatch |
+| Main CI ([40256672282](https://github.com/automation-agent-ai/multilingual-ticket-triage-devops/actions/runs/40256672282)) | ✅ Build/scan/push only |
+
+---
+
+## Pipeline Flow
 
 ```
 Push to feat/aws-bedrock-migration
   ↓
-AWS Feature Image Build (CI)
-  ├─ pytest (761 tests)
+AWS CI/CD Pipeline (aws-ci-cd.yml)
+  ├─ pytest (781 tests, all passed)
   ├─ Docker build
-  ├─ Trivy scan (CRITICAL/HIGH fails)
+  ├─ Trivy scan (CRITICAL/HIGH blocking gate)
   └─ Push to GHCR (aws-sha-<commit>)
-  ↓ (automatic trigger)
+  ↓ (integrated workflow)
 AWS DEV Deployment
-  ├─ Validate image
-  ├─ Deploy via SSM to triage-dev
-  ├─ kubectl rollout status
+  ├─ Resolve image SHA256 digest
+  ├─ Deploy via OIDC → IAM → SSM to triage-dev
+  ├─ kubectl apply + rollout status
   ├─ Smoke tests (/health, /ready, POST /triage)
-  └─ Verify Bedrock inference
-  ↓ (manual approval required)
-AWS PROD Promotion
+  └─ Verify Bedrock inference metadata
+  ↓ (manual workflow_dispatch only)
+AWS PROD Promotion (aws-prod-promote.yml)
   ├─ Confirmation: "PROMOTE"
-  ├─ ← APPROVAL GATE (GitHub Environment)
-  ├─ Deploy same image to triage-prod
-  ├─ Smoke tests + public gateway check
+  ├─ ← APPROVAL GATE (GitHub Environment aws-prod)
+  ├─ Deploy same immutable image to triage-prod
+  ├─ Extended smoke tests + public gateway
   ├─ Automatic rollback on failure
-  └─ Success ✅
+  └─ Not verified in this project (manual workflow + approval; reviewer gate incomplete)
 ```
 
 ---
@@ -39,9 +56,10 @@ AWS PROD Promotion
 
 | File | Trigger | Purpose | Status |
 |------|---------|---------|--------|
-| `aws-feature-image-build.yml` | Push to feat/aws-bedrock-migration | CI: test, build, scan, publish | ✅ Active |
-| `aws-deploy-dev.yml` | After CI success / manual | Deploy to AWS triage-dev | 📝 Prepared |
-| `aws-deploy-prod.yml` | Manual with approval | Promote to AWS triage-prod | 📝 Prepared |
+| `aws-ci-cd.yml` | Push to `feat/aws-bedrock-migration` | Integrated CI/CD: test → build → scan → DEV deploy | ✅ **Verified** ([run 40256053016](https://github.com/automation-agent-ai/multilingual-ticket-triage-devops/actions/runs/40256053016)) |
+| `aws-prod-promote.yml` | Manual `workflow_dispatch` only | Promote validated DEV image to PROD with approval | 📝 **Prepared** (not executed) |
+
+**Current trigger limitation:** `aws-ci-cd.yml` activates on `feat/aws-bedrock-migration` branch push only. Not yet configured for `main` branch automatic deployment.
 
 ### Deployment Method
 
@@ -242,15 +260,16 @@ Repository → Settings → Environments → New environment
 
 ## Workflow Details
 
-### AWS Feature Image Build
+### AWS CI/CD Pipeline (Integrated)
 
-**File:** `.github/workflows/aws-feature-image-build.yml`
+**File:** `.github/workflows/aws-ci-cd.yml`
 
 **Triggers:**
 - Push to `feat/aws-bedrock-migration`
+- Manual `workflow_dispatch` (DEV or PROD target)
 
 **Jobs:**
-1. **test** — pytest (761 tests, ~30s)
+1. **test** — pytest (781 fast tests in CI, ~30s)
 2. **build-scan-push**
    - Build Docker image (GHA cache)
    - Trivy scan (CRITICAL/HIGH fails build)
@@ -265,13 +284,13 @@ Repository → Settings → Environments → New environment
 ghcr.io/automation-agent-ai/multilingual-ticket-triage-devops:aws-sha-<commit>
 ```
 
-### AWS DEV Deployment
+### AWS DEV Deployment (within `aws-ci-cd.yml`)
 
-**File:** `.github/workflows/aws-deploy-dev.yml`
+**File:** `.github/workflows/aws-ci-cd.yml` (deploy jobs in same workflow)
 
 **Triggers:**
-- `workflow_run`: After successful AWS Feature Image Build
-- `workflow_dispatch`: Manual trigger with image tag
+- Push to `feat/aws-bedrock-migration` (after test/build jobs)
+- `workflow_dispatch` with `deploy_target: dev`
 
 **Jobs:**
 
@@ -303,7 +322,9 @@ ghcr.io/automation-agent-ai/multilingual-ticket-triage-devops:aws-sha-<commit>
 
 ### AWS PROD Promotion
 
-**File:** `.github/workflows/aws-deploy-prod.yml`
+**File:** `.github/workflows/aws-prod-promote.yml` (also optional PROD path in `aws-ci-cd.yml` via `workflow_dispatch`)
+
+**Verification:** ❌ **Not executed successfully in this repository** — document as prepared only.
 
 **Triggers:**
 - `workflow_dispatch` ONLY (manual)
