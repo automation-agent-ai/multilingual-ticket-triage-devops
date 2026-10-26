@@ -7,16 +7,9 @@ resource "aws_iam_openid_connect_provider" "github_actions" {
     "sts.amazonaws.com"
   ]
 
-  # GitHub's stable OIDC thumbprint
+  # Live thumbprint on token.actions.githubusercontent.com (eu-west-1 account 523231704152).
+  # Differs from legacy docs that list 6938fd4d…; must match imported provider or plan shows change.
   thumbprint_list = [
-    "6938fd4d98bab03faadb97b34396831e3780aea1"
+    "ab9d0263244dd0326eb67015705a667e79cfe998"
   ]
-
-  tags = merge(
-    var.common_tags,
-    {
-      Name    = "github-actions-oidc-provider"
-      Purpose = "GitHubActionsOIDC"
-    }
-  )
 }

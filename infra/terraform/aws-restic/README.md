@@ -23,6 +23,7 @@
 3. **S3 Versioning** — Enabled (Restic-safe)
 4. **S3 Public Access Block** — All blocked
 5. **S3 Lifecycle** — Optional old version cleanup
+6. **EC2 inline IAM** — `iam-ec2-restic-policy.tf` (`ResticBackupPolicy` on the instance role). **Optional:** not imported in `aws-infra`; apply this stack only when moving Restic to S3. Live backups today use local EBS + Hetzner REST.
 
 **Cost:** ~$0.50/month (assuming ~20 GB repository)
 

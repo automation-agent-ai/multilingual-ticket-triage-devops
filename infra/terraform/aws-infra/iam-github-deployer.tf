@@ -1,8 +1,9 @@
 # GitHub Actions Deployment Role - SSM-based CI/CD
+# Source aligned to live IAM (CloudShell G11.2 authoritative export).
 
-# Trust policy for GitHub OIDC
 data "aws_iam_policy_document" "github_actions_assume_role" {
   statement {
+    sid    = "GitHubActionsOIDCAssumeRole"
     effect = "Allow"
 
     principals {
@@ -18,7 +19,6 @@ data "aws_iam_policy_document" "github_actions_assume_role" {
       values   = ["sts.amazonaws.com"]
     }
 
-    # Environment-based access with GitHub immutable OIDC subjects (owner/repo numeric IDs).
     condition {
       test     = "StringEquals"
       variable = "token.actions.githubusercontent.com:sub"
@@ -27,11 +27,9 @@ data "aws_iam_policy_document" "github_actions_assume_role" {
   }
 }
 
-# Permissions policy for SSM deployment
 data "aws_iam_policy_document" "github_actions_permissions" {
-  # SSM Run Command
   statement {
-    sid    = "SSMRunCommand"
+    sid    = "AllowApprovedSSMDocument"
     effect = "Allow"
 
     actions = [
@@ -39,14 +37,25 @@ data "aws_iam_policy_document" "github_actions_permissions" {
     ]
 
     resources = [
-      "arn:aws:ssm:${var.aws_region}::document/AWS-RunShellScript",
+      "arn:aws:ssm:${var.aws_region}::document/AWS-RunShellScript"
+    ]
+  }
+
+  statement {
+    sid    = "AllowOnlyLioraEC2Instance"
+    effect = "Allow"
+
+    actions = [
+      "ssm:SendCommand"
+    ]
+
+    resources = [
       "arn:aws:ec2:${var.aws_region}:${data.aws_caller_identity.current.account_id}:instance/${var.ec2_instance_id}"
     ]
   }
 
-  # SSM Get Command Results
   statement {
-    sid    = "SSMGetCommandResults"
+    sid    = "AllowCommandResultLookup"
     effect = "Allow"
 
     actions = [
@@ -62,9 +71,8 @@ data "aws_iam_policy_document" "github_actions_permissions" {
     }
   }
 
-  # SSM Describe Instances
   statement {
-    sid    = "SSMDescribeInstance"
+    sid    = "AllowSSMInstancePreflight"
     effect = "Allow"
 
     actions = [
@@ -81,24 +89,13 @@ data "aws_iam_policy_document" "github_actions_permissions" {
   }
 }
 
-# IAM Role for GitHub Actions
 resource "aws_iam_role" "github_actions_deployer" {
   name                 = "github-actions-aws-deployer"
   assume_role_policy   = data.aws_iam_policy_document.github_actions_assume_role.json
-  description          = "GitHub Actions deployment role for AWS k3s CI/CD via SSM"
-  max_session_duration = 3600 # 1 hour
-
-  tags = merge(
-    var.common_tags,
-    {
-      Name       = "github-actions-aws-deployer"
-      Purpose    = "CICD"
-      Repository = var.github_repository
-    }
-  )
+  description          = "GitHub Actions CI/CD deployment role for Liora AI Ticket Triage"
+  max_session_duration = 3600
 }
 
-# Attach permissions policy
 resource "aws_iam_role_policy" "github_actions_ssm" {
   name   = "SSMDeploymentPolicy"
   role   = aws_iam_role.github_actions_deployer.id
