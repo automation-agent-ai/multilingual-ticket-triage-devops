@@ -1,0 +1,59 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# ──────────────────────────────────────────────────────────────────────────────
+# AWS DEV Overlay — triage-dev namespace
+#
+# PURPOSE:
+#   AWS EC2 k3s deployment using Amazon Bedrock (eu-west-1).
+#   Extends base manifests with AWS-specific configuration.
+#
+# DIFFERENCES FROM WSL DEV:
+#   - Image: GHCR registry (not pre-loaded local image)
+#   - Volumes: /mnt/data/* (not /data/* WSL paths)
+#   - Config: config-aws.yaml (Bedrock, not Ollama)
+#   - IAM: EC2 instance role for Bedrock credentials
+#   - Resources: Conservative limits for shared 16 GiB node
+#
+# DEPLOYMENT PREREQUISITES:
+#   1. Data transfer complete: rsync data to /mnt/data/app-data-dev
+#   2. HuggingFace cache: Pre-download models to /mnt/data/hf-cache
+#   3. IAM role: EC2 instance role with bedrock:InvokeModel permission
+#   4. Verify paths: ssh to EC2 and run:
+#      ls -lah /mnt/data/hf-cache /mnt/data/app-data-dev
+# ──────────────────────────────────────────────────────────────────────────────
+
+namespace: triage-dev
+
+resources:
+  - ../../base
+  - namespace.yaml
+  - configmap.yaml
+
+# Environment-specific labels
+commonLabels:
+  environment: aws-dev
+  cluster: k3s
+  region: eu-west-1
+
+# Strategic merge patches
+patches:
+  - path: patches/deployment.yaml
+    target:
+      kind: Deployment
+      name: ticket-triage
+
+# Image from GHCR with immutable commit tag
+# ✅ DEPLOYED: AWS Bedrock feature image (feat/aws-bedrock-migration branch)
+#
+# Published via GitHub Actions workflow: aws-build-scan-push.yml
+# Workflow run: 38283289592
+# Trivy scan: PASSED (no CRITICAL/HIGH vulnerabilities)
+# Tests: 761 passed (including Bedrock client tests)
+# Commit: bbe590a3b19b569785251cbfd005d8ea86ecf084
+#
+# Deployment date: 2026-10-12
+images:
+  - name: ticket-triage-api
+    newName: ghcr.io/automation-agent-ai/multilingual-ticket-triage-devops
+    newTag: aws-sha-bbe590a3b19b569785251cbfd005d8ea86ecf084

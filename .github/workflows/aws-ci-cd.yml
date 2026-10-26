@@ -1,0 +1,528 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# AWS CI/CD Pipeline — Complete Build + Deploy
+#
+# PURPOSE:
+#   Atomic CI/CD pipeline for AWS Bedrock deployment:
+#   Test → Build → Scan → Push → Deploy DEV → (Manual) Deploy PROD
+#
+# TRIGGERS:
+#   push → feat/aws-bedrock-migration   : Full CI + automatic DEV deployment
+#   workflow_dispatch                    : Manual DEV or PROD deployment
+#
+# ARCHITECTURE:
+#   Single integrated workflow with dependent jobs (no workflow_run complexity).
+#   Works immediately on feature branch without requiring merge to main.
+#
+# SECURITY:
+#   • GitHub OIDC authentication (no static AWS credentials)
+#   • Least-privilege IAM role (SSM only, specific instance)
+#   • GitHub Environment protection (aws-prod requires approval)
+#   • Immutable image deployment (SHA256 digest)
+#   • Automatic rollback on failure
+#
+# ISOLATION FROM WSL PIPELINE:
+#   • Different workflow name
+#   • Different image tags (aws-sha- vs sha-)
+#   • Different Kustomize overlays (k8s/overlays/aws-*)
+#   • GitHub-hosted runners only
+# ──────────────────────────────────────────────────────────────────────────────
+
+name: AWS CI/CD Pipeline
+
+on:
+  push:
+    branches: [feat/aws-bedrock-migration]
+  
+  workflow_dispatch:
+    inputs:
+      deploy_target:
+        description: "Deployment target"
+        type: choice
+        options:
+          - dev
+          - prod
+        default: dev
+      image_tag:
+        description: "Image tag (aws-sha-<commit>, leave empty for latest commit)"
+        required: false
+      confirm_production:
+        description: 'For PROD: Type "PROMOTE" to confirm'
+        required: false
+      skip_ci:
+        description: "Skip CI (use existing image)"
+        type: boolean
+        default: false
+
+# Minimum default permissions
+permissions:
+  contents: read
+  id-token: write  # Required for AWS OIDC
+
+# Prevent concurrent deployments
+concurrency:
+  group: aws-cicd-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: eu-west-1
+  EC2_INSTANCE_ID: i-07bc3aaf0d692974d
+  REGISTRY: ghcr.io
+  IMAGE_NAME: automation-agent-ai/multilingual-ticket-triage-devops
+
+jobs:
+  # ────────────────────────────────────────────────────────────────────────────
+  # Job 1: Python Tests
+  # ────────────────────────────────────────────────────────────────────────────
+  test:
+    name: Python Tests
+    runs-on: ubuntu-latest
+    if: github.event.inputs.skip_ci != 'true'
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install CPU-only PyTorch
+        run: |
+          pip install --upgrade pip
+          pip install "torch==2.10.0+cpu" \
+            --index-url https://download.pytorch.org/whl/cpu
+
+      - name: Install project dependencies
+        run: |
+          pip install -r requirements-docker.txt \
+            --extra-index-url https://download.pytorch.org/whl/cpu
+
+      - name: Install test extras
+        run: pip install "pytest==8.3.5" "httpx==0.28.1"
+
+      - name: Run tests (excluding slow tests)
+        run: pytest tests/ -m "not slow" -v --tb=short
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # Job 2: Build, Scan, Push
+  # ────────────────────────────────────────────────────────────────────────────
+  build:
+    name: Build · Scan · Push
+    runs-on: ubuntu-latest
+    needs: [test]
+    if: |
+      always() &&
+      (needs.test.result == 'success' || needs.test.result == 'skipped')
+    
+    permissions:
+      contents: read
+      packages: write
+      security-events: write
+    
+    outputs:
+      image-tag: ${{ steps.image-ref.outputs.tag }}
+      image-ref: ${{ steps.image-ref.outputs.ref }}
+      image-digest: ${{ steps.push.outputs.digest }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Compute image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=sha,prefix=aws-sha-,format=long
+          labels: |
+            org.opencontainers.image.title=Liora Ticket Triage API (AWS)
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build image for scanning
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: ticket-triage-api:scan
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Trivy scan (diagnostic)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: ticket-triage-api:scan
+          format: table
+          scanners: vuln
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "0"
+
+      - name: Trivy scan (blocking)
+        id: trivy
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: ticket-triage-api:scan
+          format: sarif
+          output: trivy-results.sarif
+          scanners: vuln
+          severity: CRITICAL,HIGH
+          exit-code: "1"
+          ignore-unfixed: true
+          limit-severities-for-sarif: true
+
+      - name: Upload Trivy SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-results.sarif
+          category: trivy-aws-scan
+
+      - name: Push image to GHCR
+        id: push
+        if: steps.trivy.outcome == 'success'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+
+      - name: Set image reference output
+        id: image-ref
+        run: |
+          TAG="aws-sha-${{ github.sha }}"
+          REF="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${TAG}"
+          
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "ref=${REF}" >> "$GITHUB_OUTPUT"
+          
+          {
+            echo "### ✅ Image Published"
+            echo "- Tag: \`${TAG}\`"
+            echo "- Ref: \`${REF}\`"
+            if [ -n "${{ steps.push.outputs.digest }}" ]; then
+              echo "- Digest: \`${{ steps.push.outputs.digest }}\`"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # Job 3: Resolve Deployment Image
+  # ────────────────────────────────────────────────────────────────────────────
+  resolve-image:
+    name: Resolve Deployment Image
+    runs-on: ubuntu-latest
+    needs: [build]
+    if: always()
+    
+    outputs:
+      image-tag: ${{ steps.resolve.outputs.tag }}
+      image-ref: ${{ steps.resolve.outputs.ref }}
+      deploy-dev: ${{ steps.decide.outputs.dev }}
+      deploy-prod: ${{ steps.decide.outputs.prod }}
+    
+    steps:
+      - name: Resolve image for deployment
+        id: resolve
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            # Manual trigger: use input or latest build
+            if [ -n "${{ github.event.inputs.image_tag }}" ]; then
+              TAG="${{ github.event.inputs.image_tag }}"
+            else
+              TAG="${{ needs.build.outputs.image-tag }}"
+            fi
+          else
+            # Automatic push: use just-built image
+            TAG="${{ needs.build.outputs.image-tag }}"
+          fi
+          
+          REF="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${TAG}"
+          
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "ref=${REF}" >> "$GITHUB_OUTPUT"
+          
+          echo "Deployment image: ${REF}"
+
+      - name: Decide deployment targets
+        id: decide
+        run: |
+          DEPLOY_DEV="false"
+          DEPLOY_PROD="false"
+          
+          if [ "${{ github.event_name }}" = "push" ]; then
+            # Automatic: deploy to DEV only
+            DEPLOY_DEV="true"
+          elif [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            # Manual: deploy to selected target
+            if [ "${{ github.event.inputs.deploy_target }}" = "dev" ]; then
+              DEPLOY_DEV="true"
+            elif [ "${{ github.event.inputs.deploy_target }}" = "prod" ]; then
+              DEPLOY_PROD="true"
+            fi
+          fi
+          
+          echo "dev=${DEPLOY_DEV}" >> "$GITHUB_OUTPUT"
+          echo "prod=${DEPLOY_PROD}" >> "$GITHUB_OUTPUT"
+          
+          echo "Deploy to DEV: ${DEPLOY_DEV}"
+          echo "Deploy to PROD: ${DEPLOY_PROD}"
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # Job 4: Deploy to AWS DEV
+  # ────────────────────────────────────────────────────────────────────────────
+  deploy-dev:
+    name: Deploy to AWS triage-dev
+    runs-on: ubuntu-latest
+    needs: [resolve-image]
+    if: needs.resolve-image.outputs.deploy-dev == 'true'
+    environment: aws-dev
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::523231704152:role/github-actions-aws-deployer
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: gh-aws-dev-${{ github.run_id }}
+
+      - name: Verify SSM connectivity
+        run: |
+          PING=$(aws ssm describe-instance-information \
+            --filters "Key=InstanceIds,Values=${{ env.EC2_INSTANCE_ID }}" \
+            --query 'InstanceInformationList[0].PingStatus' \
+            --output text)
+          
+          if [ "$PING" != "Online" ]; then
+            echo "::error::EC2 instance not online in SSM: $PING"
+            exit 1
+          fi
+          echo "✅ SSM connectivity verified"
+
+      - name: Deploy to triage-dev via SSM
+        id: deploy
+        env:
+          DEPLOY_OVERLAY: /home/ubuntu/workspaces/multilingual-ticket-triage-devops/k8s/overlays/aws-dev
+        run: |
+          set -euo pipefail
+          IMAGE_REF="${{ needs.resolve-image.outputs.image-ref }}"
+          REMOTE_SCRIPT="${GITHUB_WORKSPACE}/.github/scripts/ssm-remote-kustomize-deploy.sh"
+          WAIT_SCRIPT="${GITHUB_WORKSPACE}/.github/scripts/ssm-wait-command-invocation.sh"
+
+          if [[ ! "$IMAGE_REF" =~ ^ghcr\.io/automation-agent-ai/multilingual-ticket-triage-devops:aws-sha-[0-9a-f]{40}$ ]]; then
+            echo "::error::Invalid image reference for DEV deploy"
+            exit 1
+          fi
+
+          SSM_PAYLOAD=$(jq -n \
+            --arg image "$IMAGE_REF" \
+            --arg namespace "triage-dev" \
+            --arg overlay "$DEPLOY_OVERLAY" \
+            --rawfile body "$REMOTE_SCRIPT" \
+            --arg delim "__SSM_KUSTOMIZE_DEPLOY__" \
+            '{commands: [
+              "export DEPLOY_IMAGE=" + ($image | @sh)
+                + " DEPLOY_NAMESPACE=" + ($namespace | @sh)
+                + " DEPLOY_OVERLAY=" + ($overlay | @sh)
+                + " && bash <<'\''" + $delim + "'\''\n"
+                + $body + "\n" + $delim
+            ]}')
+
+          CMD_ID=$(aws ssm send-command \
+            --instance-ids "${{ env.EC2_INSTANCE_ID }}" \
+            --document-name "AWS-RunShellScript" \
+            --comment "GitHub Actions DEV deploy - run ${{ github.run_id }}" \
+            --timeout-seconds 600 \
+            --parameters "$SSM_PAYLOAD" \
+            --query 'Command.CommandId' \
+            --output text)
+
+          echo "SSM Command: $CMD_ID"
+          bash "$WAIT_SCRIPT" "$CMD_ID" "${{ env.EC2_INSTANCE_ID }}" 600
+          echo "✅ DEV deployment complete"
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # Job 5: Deploy to AWS PROD (Manual + Approval)
+  # ────────────────────────────────────────────────────────────────────────────
+  validate-prod:
+    name: Validate PROD Deployment
+    runs-on: ubuntu-latest
+    needs: [resolve-image]
+    if: needs.resolve-image.outputs.deploy-prod == 'true'
+    
+    steps:
+      - name: Verify PROMOTE confirmation
+        run: |
+          if [ "${{ github.event.inputs.confirm_production }}" != "PROMOTE" ]; then
+            echo "::error::PROD deployment requires 'PROMOTE' confirmation"
+            echo "You entered: '${{ github.event.inputs.confirm_production }}'"
+            exit 1
+          fi
+          echo "✅ PROD confirmation verified"
+
+      - name: Verify image tag format
+        run: |
+          TAG="${{ needs.resolve-image.outputs.image-tag }}"
+          if [[ ! "$TAG" =~ ^aws-sha-[0-9a-f]{40}$ ]]; then
+            echo "::error::Invalid image tag: $TAG"
+            exit 1
+          fi
+          echo "✅ Image tag validated"
+
+  deploy-prod:
+    name: Deploy to AWS triage-prod
+    runs-on: ubuntu-latest
+    needs: [resolve-image, validate-prod]
+    environment: aws-prod  # ← APPROVAL GATE
+    
+    steps:
+      - name: Verify aws-prod environment protection
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          REVIEWERS=$(gh api repos/${{ github.repository }}/environments/aws-prod \
+            --jq '.protection_rules[] | select(.type=="required_reviewers") | .reviewers | length' \
+            2>/dev/null || echo "0")
+          
+          if [ "$REVIEWERS" -lt 1 ]; then
+            echo "::error::aws-prod environment has no required reviewers"
+            echo "PROD deployment BLOCKED for safety"
+            echo "Configure at: https://github.com/${{ github.repository }}/settings/environments"
+            exit 1
+          fi
+          
+          echo "✅ aws-prod has $REVIEWERS required reviewer(s)"
+      
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::523231704152:role/github-actions-aws-deployer
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: gh-aws-prod-${{ github.run_id }}
+
+      - name: Verify SSM connectivity
+        run: |
+          PING=$(aws ssm describe-instance-information \
+            --filters "Key=InstanceIds,Values=${{ env.EC2_INSTANCE_ID }}" \
+            --query 'InstanceInformationList[0].PingStatus' \
+            --output text)
+          
+          if [ "$PING" != "Online" ]; then
+            echo "::error::EC2 instance not online in SSM"
+            exit 1
+          fi
+
+      - name: Deploy to triage-prod via SSM
+        run: |
+          IMAGE_REF="${{ needs.resolve-image.outputs.image-ref }}"
+          
+          # Same deployment script, different namespace
+          cat > /tmp/deploy-prod.sh << 'EOF'
+          #!/bin/bash
+          set -euo pipefail
+          
+          IMAGE="$1"
+          NAMESPACE="triage-prod"
+          OVERLAY="/home/ubuntu/workspaces/multilingual-ticket-triage-devops/k8s/overlays/aws-prod"
+          
+          echo "=== AWS PROD Deployment ==="
+          echo "Image: $IMAGE"
+          
+          cd "$OVERLAY"
+          
+          PREV=$(kubectl get deploy/ticket-triage -n "$NAMESPACE" \
+            -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || echo "none")
+          echo "Previous: $PREV"
+          
+          cp kustomization.yaml kustomization.yaml.backup
+          kustomize edit set image "ticket-triage-api=${IMAGE}" || {
+            curl -sL https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv5.4.3/kustomize_v5.4.3_linux_amd64.tar.gz \
+              | tar -xz -C /tmp
+            sudo mv /tmp/kustomize /usr/local/bin/
+            kustomize edit set image "ticket-triage-api=${IMAGE}"
+          }
+          
+          kubectl apply -k .
+          
+          if kubectl rollout status deploy/ticket-triage -n "$NAMESPACE" --timeout=600s; then
+            echo "✅ PROD deployment successful"
+          else
+            echo "❌ Rollout failed, rolling back"
+            mv kustomization.yaml.backup kustomization.yaml
+            kubectl rollout undo deploy/ticket-triage -n "$NAMESPACE"
+            exit 1
+          fi
+          
+          ACTUAL=$(kubectl get deploy/ticket-triage -n "$NAMESPACE" \
+            -o jsonpath='{.spec.template.spec.containers[0].image}')
+          echo "Deployed: $ACTUAL"
+          
+          if [ "$ACTUAL" != "$IMAGE" ]; then
+            echo "⚠️  Image mismatch"
+            exit 1
+          fi
+          EOF
+          
+          chmod +x /tmp/deploy-prod.sh
+          
+          CMD_ID=$(aws ssm send-command \
+            --instance-ids "${{ env.EC2_INSTANCE_ID }}" \
+            --document-name "AWS-RunShellScript" \
+            --comment "GitHub Actions PROD deploy - run ${{ github.run_id }}" \
+            --timeout-seconds 900 \
+            --parameters "$(jq -n \
+              --arg script "$(cat /tmp/deploy-prod.sh)" \
+              --arg image "$IMAGE_REF" \
+              '{commands: [$script, "bash -s \($image)"]}' \
+            )" \
+            --query 'Command.CommandId' \
+            --output text)
+          
+          aws ssm wait command-executed \
+            --command-id "$CMD_ID" \
+            --instance-id "${{ env.EC2_INSTANCE_ID }}" \
+            --timeout 900 || true
+          
+          STATUS=$(aws ssm get-command-invocation \
+            --command-id "$CMD_ID" \
+            --instance-id "${{ env.EC2_INSTANCE_ID }}" \
+            --query 'Status' \
+            --output text)
+          
+          aws ssm get-command-invocation \
+            --command-id "$CMD_ID" \
+            --instance-id "${{ env.EC2_INSTANCE_ID }}" \
+            --query 'StandardOutputContent' \
+            --output text
+          
+          if [ "$STATUS" != "Success" ]; then
+            aws ssm get-command-invocation \
+              --command-id "$CMD_ID" \
+              --instance-id "${{ env.EC2_INSTANCE_ID }}" \
+              --query 'StandardErrorContent' \
+              --output text
+            exit 1
+          fi
+          
+          echo "✅ PROD deployment complete"

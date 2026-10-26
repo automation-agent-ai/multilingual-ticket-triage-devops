@@ -45,17 +45,18 @@ def test_generate_json_calls_correct_url():
     with patch("requests.post") as mock_post:
         mock_post.return_value = make_mock_response('{"topic": "Other"}')
         client = make_client()
-        client.generate_json("test prompt")
+        result, metadata = client.generate_json("test prompt")
 
     called_url = mock_post.call_args[0][0]
     assert called_url == "http://localhost:11434/api/generate"
+    assert metadata["invoked"] is True
 
 
 def test_generate_json_sends_correct_payload():
     with patch("requests.post") as mock_post:
         mock_post.return_value = make_mock_response('{"topic": "Other"}')
         client = make_client()
-        client.generate_json("test prompt")
+        result, metadata = client.generate_json("test prompt")
 
     payload = mock_post.call_args[1]["json"]
     assert payload["model"]          == "qwen3:8b"
@@ -63,6 +64,7 @@ def test_generate_json_sends_correct_payload():
     assert payload["format"]         == "json"
     assert payload["stream"]         is False
     assert payload["options"]["temperature"] == pytest.approx(0.1)
+    assert metadata["model_id"] == "qwen3:8b"
 
 
 # ─── Response parsing ─────────────────────────────────────────────────────────
@@ -72,9 +74,12 @@ def test_generate_json_returns_response_field():
     with patch("requests.post") as mock_post:
         mock_post.return_value = make_mock_response(expected)
         client = make_client()
-        result = client.generate_json("test prompt")
+        result, metadata = client.generate_json("test prompt")
 
     assert result == expected
+    assert metadata["invoked"] is True
+    assert metadata["input_tokens"] is None  # Ollama doesn't provide token counts
+    assert metadata["output_tokens"] is None
 
 
 # ─── Error handling ───────────────────────────────────────────────────────────
@@ -97,8 +102,9 @@ def test_base_url_trailing_slash_is_stripped():
     )
     with patch("requests.post") as mock_post:
         mock_post.return_value = make_mock_response('{"topic": "Other"}')
-        client.generate_json("test prompt")
+        result, metadata = client.generate_json("test prompt")
 
     called_url = mock_post.call_args[0][0]
     assert called_url == "http://localhost:11434/api/generate"
     assert "//" not in called_url.replace("://", "___")
+    assert metadata["invoked"] is True

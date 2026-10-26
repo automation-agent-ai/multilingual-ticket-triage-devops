@@ -1,0 +1,184 @@
+{
+  "uid": "triage-aws-comparison",
+  "title": "Ticket Triage — AWS DEV vs PROD",
+  "description": "Comprehensive comparison of DEV and PROD environments on AWS k3s cluster",
+  "tags": ["ticket-triage", "aws", "comparison"],
+  "schemaVersion": 38,
+  "version": 1,
+  "refresh": "30s",
+  "time": { "from": "now-1h", "to": "now" },
+  "timezone": "browser",
+  "editable": true,
+  "graphTooltip": 1,
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "DEV Availability",
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "triage-prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            { "type": "value", "options": { "0": { "text": "DOWN", "color": "red" }, "1": { "text": "UP", "color": "green" } } }
+          ],
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "red", "value": null }, { "color": "green", "value": 1 } ] },
+          "unit": "short",
+          "color": { "mode": "thresholds" }
+        }
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background", "graphMode": "none", "justifyMode": "center", "textMode": "auto" },
+      "targets": [{ "datasource": { "type": "prometheus", "uid": "triage-prometheus" }, "expr": "up{job=\"ticket-triage-dev\"}", "refId": "A" }]
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "PROD Availability",
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "triage-prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            { "type": "value", "options": { "0": { "text": "DOWN", "color": "red" }, "1": { "text": "UP", "color": "green" } } }
+          ],
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "red", "value": null }, { "color": "green", "value": 1 } ] },
+          "unit": "short",
+          "color": { "mode": "thresholds" }
+        }
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background", "graphMode": "none", "justifyMode": "center", "textMode": "auto" },
+      "targets": [{ "datasource": { "type": "prometheus", "uid": "triage-prometheus" }, "expr": "up{job=\"ticket-triage-prod\"}", "refId": "A" }]
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "DEV Total Requests",
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "triage-prometheus" },
+      "fieldConfig": { "defaults": { "unit": "short", "color": { "mode": "palette-classic" } } },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "area", "justifyMode": "auto", "textMode": "auto" },
+      "targets": [{ "datasource": { "type": "prometheus", "uid": "triage-prometheus" }, "expr": "sum(http_requests_total{job=\"ticket-triage-dev\"})", "refId": "A" }]
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "PROD Total Requests",
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "triage-prometheus" },
+      "fieldConfig": { "defaults": { "unit": "short", "color": { "mode": "palette-classic" } } },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "area", "justifyMode": "auto", "textMode": "auto" },
+      "targets": [{ "datasource": { "type": "prometheus", "uid": "triage-prometheus" }, "expr": "sum(http_requests_total{job=\"ticket-triage-prod\"})", "refId": "A" }]
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "HTTP Request Rate — DEV vs PROD",
+      "description": "Request throughput comparison over 5-minute windows",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
+      "datasource": { "type": "prometheus", "uid": "triage-prometheus" },
+      "fieldConfig": {
+        "defaults": { "unit": "reqps", "custom": { "lineWidth": 2, "fillOpacity": 10 } }
+      },
+      "options": { "tooltip": { "mode": "multi", "sort": "desc" }, "legend": { "displayMode": "list", "placement": "bottom" } },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "triage-prometheus" }, "expr": "sum(rate(http_requests_total{job=\"ticket-triage-dev\"}[5m])) by (environment)", "legendFormat": "DEV", "refId": "A" },
+        { "datasource": { "type": "prometheus", "uid": "triage-prometheus" }, "expr": "sum(rate(http_requests_total{job=\"ticket-triage-prod\"}[5m])) by (environment)", "legendFormat": "PROD", "refId": "B" }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "HTTP Error Rates (4xx + 5xx)",
+      "description": "Error response rates by environment",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
+      "datasource": { "type": "prometheus", "uid": "triage-prometheus" },
+      "fieldConfig": {
+        "defaults": { "unit": "reqps", "custom": { "lineWidth": 2, "fillOpacity": 20 } }
+      },
+      "options": { "tooltip": { "mode": "multi", "sort": "desc" }, "legend": { "displayMode": "list", "placement": "bottom" } },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "triage-prometheus" }, "expr": "sum(rate(http_requests_total{job=\"ticket-triage-dev\",status_code=~\"4..|5..\"}[5m])) by (environment)", "legendFormat": "DEV errors", "refId": "A" },
+        { "datasource": { "type": "prometheus", "uid": "triage-prometheus" }, "expr": "sum(rate(http_requests_total{job=\"ticket-triage-prod\",status_code=~\"4..|5..\"}[5m])) by (environment)", "legendFormat": "PROD errors", "refId": "B" }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Response Latency p50 — DEV vs PROD",
+      "description": "Median response time for /triage endpoint",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 },
+      "datasource": { "type": "prometheus", "uid": "triage-prometheus" },
+      "fieldConfig": {
+        "defaults": { "unit": "s", "custom": { "lineWidth": 2, "fillOpacity": 5 } }
+      },
+      "options": { "tooltip": { "mode": "multi", "sort": "desc" }, "legend": { "displayMode": "list", "placement": "bottom" } },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "triage-prometheus" }, "expr": "histogram_quantile(0.50, sum(rate(http_request_duration_seconds_bucket{job=\"ticket-triage-dev\",route=\"/triage\"}[5m])) by (le, environment))", "legendFormat": "DEV p50", "refId": "A" },
+        { "datasource": { "type": "prometheus", "uid": "triage-prometheus" }, "expr": "histogram_quantile(0.50, sum(rate(http_request_duration_seconds_bucket{job=\"ticket-triage-prod\",route=\"/triage\"}[5m])) by (le, environment))", "legendFormat": "PROD p50", "refId": "B" }
+      ]
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Response Latency p95 — DEV vs PROD",
+      "description": "95th percentile response time for /triage endpoint",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 12 },
+      "datasource": { "type": "prometheus", "uid": "triage-prometheus" },
+      "fieldConfig": {
+        "defaults": { "unit": "s", "custom": { "lineWidth": 2, "fillOpacity": 5 } }
+      },
+      "options": { "tooltip": { "mode": "multi", "sort": "desc" }, "legend": { "displayMode": "list", "placement": "bottom" } },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "triage-prometheus" }, "expr": "histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket{job=\"ticket-triage-dev\",route=\"/triage\"}[5m])) by (le, environment))", "legendFormat": "DEV p95", "refId": "A" },
+        { "datasource": { "type": "prometheus", "uid": "triage-prometheus" }, "expr": "histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket{job=\"ticket-triage-prod\",route=\"/triage\"}[5m])) by (le, environment))", "legendFormat": "PROD p95", "refId": "B" }
+      ]
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Process Memory — DEV vs PROD",
+      "description": "Resident memory usage by environment",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 20 },
+      "datasource": { "type": "prometheus", "uid": "triage-prometheus" },
+      "fieldConfig": {
+        "defaults": { "unit": "bytes", "custom": { "lineWidth": 2, "fillOpacity": 10 } }
+      },
+      "options": { "tooltip": { "mode": "multi", "sort": "desc" }, "legend": { "displayMode": "list", "placement": "bottom" } },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "triage-prometheus" }, "expr": "process_resident_memory_bytes{job=\"ticket-triage-dev\"}", "legendFormat": "DEV memory", "refId": "A" },
+        { "datasource": { "type": "prometheus", "uid": "triage-prometheus" }, "expr": "process_resident_memory_bytes{job=\"ticket-triage-prod\"}", "legendFormat": "PROD memory", "refId": "B" }
+      ]
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "Process CPU — DEV vs PROD",
+      "description": "Total CPU seconds consumed by process",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 20 },
+      "datasource": { "type": "prometheus", "uid": "triage-prometheus" },
+      "fieldConfig": {
+        "defaults": { "unit": "s", "custom": { "lineWidth": 2, "fillOpacity": 10 } }
+      },
+      "options": { "tooltip": { "mode": "multi", "sort": "desc" }, "legend": { "displayMode": "list", "placement": "bottom" } },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "triage-prometheus" }, "expr": "rate(process_cpu_seconds_total{job=\"ticket-triage-dev\"}[5m])", "legendFormat": "DEV CPU rate", "refId": "A" },
+        { "datasource": { "type": "prometheus", "uid": "triage-prometheus" }, "expr": "rate(process_cpu_seconds_total{job=\"ticket-triage-prod\"}[5m])", "legendFormat": "PROD CPU rate", "refId": "B" }
+      ]
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "Prometheus Scrape Health",
+      "description": "Scrape success indicator for all targets",
+      "gridPos": { "h": 6, "w": 24, "x": 0, "y": 28 },
+      "datasource": { "type": "prometheus", "uid": "triage-prometheus" },
+      "fieldConfig": {
+        "defaults": { "unit": "short", "custom": { "lineWidth": 2, "fillOpacity": 20 }, "min": 0, "max": 1 }
+      },
+      "options": { "tooltip": { "mode": "multi", "sort": "desc" }, "legend": { "displayMode": "table", "placement": "right" } },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "triage-prometheus" }, "expr": "up{job=~\"ticket-triage.*\"}", "legendFormat": "{{job}}", "refId": "A" }
+      ]
+    }
+  ]
+}

@@ -55,6 +55,7 @@ import time
 
 from src.domain.models import (
     ActionExecutionResult,
+    InferenceMetadata,
     LLMAnalysis,
     NeighborPrediction,
     TicketInput,
@@ -174,7 +175,7 @@ class TicketTriageAgent:
 
         # Step 2 — local LLM structured analysis (first pass).
         t0 = time.perf_counter()
-        first_analysis: LLMAnalysis = self.analyzer.analyze(ticket, neighbor_prediction)
+        first_analysis, inference_metadata = self.analyzer.analyze(ticket, neighbor_prediction)
         llm_seconds = time.perf_counter() - t0
 
         # Step 3 — deterministic validation of the first analysis.
@@ -259,6 +260,20 @@ class TicketTriageAgent:
 
         total_ticket_seconds = time.perf_counter() - t_total
 
+        # Build InferenceMetadata from aggregated metadata
+        inference = None
+        if inference_metadata:
+            inference = InferenceMetadata(
+                provider=inference_metadata.get("provider", "unknown"),
+                model=inference_metadata.get("model_id", "unknown"),
+                region=inference_metadata.get("region"),
+                invoked=inference_metadata.get("invoked", False),
+                input_tokens=inference_metadata.get("input_tokens"),
+                output_tokens=inference_metadata.get("output_tokens"),
+                latency_ms=inference_metadata.get("latency_ms"),
+                invocation_count=inference_metadata.get("invocation_count", 1),
+            )
+
         # Step 7 — assemble TriageResult.
         result = TriageResult(
             ticket_id=ticket.ticket_id,
@@ -272,6 +287,7 @@ class TicketTriageAgent:
             requires_human_review=final_validation.requires_human_review,
             short_note=final_analysis.short_note,
             action_result=action_result,
+            inference=inference,
         )
 
         timing = {

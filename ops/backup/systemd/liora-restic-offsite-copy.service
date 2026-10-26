@@ -1,0 +1,53 @@
+[Unit]
+Description=Liora Restic offsite copy to Hetzner REST
+Documentation=https://github.com/automation-agent-ai/multilingual-ticket-triage-devops
+After=network-online.target tailscaled.service
+Wants=network-online.target tailscaled.service
+
+[Service]
+Type=oneshot
+User=ubuntu
+Group=ubuntu
+RuntimeDirectory=liora-restic-backup
+RuntimeDirectoryMode=0700
+StateDirectory=liora-restic
+StateDirectoryMode=0750
+WorkingDirectory=/home/ubuntu/phase11-backup-implementation/scripts
+
+ExecStart=/home/ubuntu/phase11-backup-implementation/scripts/restic-offsite-copy.sh
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=liora-restic-offsite
+
+TimeoutStartSec=2h
+MemoryMax=2G
+Restart=no
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+
+ReadOnlyPaths=/home/ubuntu/phase11-backup-implementation
+ReadOnlyPaths=/etc/liora-backup
+ReadOnlyPaths=/var/backups/liora-restic
+
+ReadWritePaths=/var/lib/liora-restic
+ReadWritePaths=/var/backups/liora-restic/locks
+ReadWritePaths=/var/run
+ReadWritePaths=/tmp
+
+Environment="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+Environment="RESTIC_FROM_REPOSITORY=/var/backups/liora-restic"
+Environment="RESTIC_FROM_PASSWORD_FILE=/etc/liora-backup/restic-password"
+Environment="RESTIC_REPOSITORY=rest:http://100.86.92.91:8000/aws-ec2-restic/"
+Environment="RESTIC_PASSWORD_FILE=/etc/liora-backup/restic-password"
+Environment="RESTIC_CACHE_DIR=/var/lib/liora-restic/cache"
+Environment="RESTIC_SNAPSHOT_HOST=liora-aws-ec2"
+Environment="LIORA_RESTIC_REST_CREDENTIALS_FILE=/etc/liora-backup/hetzner-rest-writer.env"
+
+# RESTIC_REST_PASSWORD loaded from file; script maps RESTIC_REST_USER → RESTIC_REST_USERNAME
+EnvironmentFile=/etc/liora-backup/hetzner-rest-writer.env
+
+[Install]
+WantedBy=multi-user.target

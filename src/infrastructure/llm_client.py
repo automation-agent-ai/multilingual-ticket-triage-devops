@@ -32,9 +32,16 @@ class OllamaClient:
         self.temperature     = temperature
         self.timeout_seconds = timeout_seconds
 
-    def generate_json(self, prompt: str) -> str:
+    def generate_json(self, prompt: str) -> tuple[str, dict]:
         """
-        Send prompt to Ollama and return the model's raw response text.
+        Send prompt to Ollama and return the model's raw response text and metadata.
+
+        Returns:
+            (text, metadata_dict) where metadata_dict contains:
+                - model_id: str
+                - region: None (Ollama is local)
+                - invoked: bool (True if successful)
+                - input_tokens, output_tokens, latency_ms: None (Ollama doesn't provide these)
 
         Raises requests.HTTPError  on non-2xx HTTP responses.
         Raises requests.Timeout    if Ollama does not respond in time.
@@ -53,4 +60,15 @@ class OllamaClient:
         response = requests.post(url, json=payload, timeout=self.timeout_seconds)
         response.raise_for_status()
         data = response.json()
-        return data["response"]
+        
+        # Create metadata (Ollama doesn't provide standardized token usage)
+        metadata = {
+            "input_tokens": None,
+            "output_tokens": None,
+            "latency_ms": None,
+            "model_id": self.model_name,
+            "region": None,
+            "invoked": True,
+        }
+        
+        return data["response"], metadata

@@ -185,6 +185,11 @@ def test_triage_processes_billing_ticket(test_client):
     assert data["missing_info"] is False
     assert data["requires_human_review"] is False
     assert data["short_note"] == "Fake billing issue detected"
+    
+    # Check that inference field exists and has expected structure
+    assert "inference" in data
+    # Inference is None in fake agent for now
+    # When we update the fake agent, it should contain the metadata
 
 
 def test_triage_processes_technical_ticket(test_client):
@@ -342,3 +347,24 @@ def test_preprocessing_applied(test_client):
     # Preprocessing should produce a text_snippet
     data = response.json()
     assert len(data["text_snippet"]) > 0
+
+
+def test_inference_metadata_field_in_response(test_client):
+    """Test that the new inference metadata field is present in the API response."""
+    request_body = {
+        "ticket_id": "inference-test-001",
+        "subject": "Billing inquiry",
+        "body": "I was charged twice for my monthly premium.",
+    }
+    response = test_client.post("/triage", json=request_body)
+    assert response.status_code == 200
+    
+    data = response.json()
+    
+    # Inference field should be present (even if None for fake agent)
+    assert "inference" in data
+    
+    # In the future, when we update fake agent to return metadata:
+    # assert data["inference"]["provider"] in ["bedrock", "ollama", "fake"]
+    # assert data["inference"]["model"] is not None
+    # assert "invoked" in data["inference"]

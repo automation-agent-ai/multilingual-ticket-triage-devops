@@ -88,9 +88,20 @@ class FakeLLMClient:
         self._iter   = iter(responses)
         self.prompts: list[str] = []
 
-    def generate_json(self, prompt: str) -> str:
+    def generate_json(self, prompt: str) -> tuple[str, dict]:
         self.prompts.append(prompt)
-        return next(self._iter)
+        text = next(self._iter)
+        # Return fake metadata (reviewer discards it)
+        metadata = {
+            "provider": "fake",
+            "model_id": "fake-reviewer-model",
+            "region": None,
+            "invoked": True,
+            "input_tokens": 100,
+            "output_tokens": 50,
+            "latency_ms": 500,
+        }
+        return text, metadata
 
 
 def make_ticket() -> TicketInput:

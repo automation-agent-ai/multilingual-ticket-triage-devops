@@ -1,0 +1,65 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# ──────────────────────────────────────────────────────────────────────────────
+# AWS PROD Overlay — triage-prod namespace
+#
+# PURPOSE:
+#   AWS EC2 k3s production deployment using Amazon Bedrock (eu-west-1).
+#   Extends base manifests with AWS-specific production configuration.
+#
+# DIFFERENCES FROM DEV:
+#   - Resources: Higher CPU/memory allocation for production stability
+#   - RELOAD: false (no auto-reload in production)
+#   - Image: Pinned by immutable SHA tag (same as DEV initially)
+#   - Volumes: /mnt/data/app-data-prod (production data copy)
+#
+# DEPLOYMENT PREREQUISITES:
+#   1. DEV deployment validated successfully
+#   2. Data transfer complete: rsync data to /mnt/data/app-data-prod
+#   3. HuggingFace cache shared: /mnt/data/hf-cache (read-only)
+#   4. IAM role: Same EC2 instance role as DEV
+#   5. Ingress: Will be exposed via Traefik (configured separately)
+#
+# SECURITY:
+#   - IAM instance role credentials (no static keys)
+#   - Data volumes mounted read-only
+#   - Public access controlled by Traefik IngressRoute (not in this overlay)
+# ──────────────────────────────────────────────────────────────────────────────
+
+namespace: triage-prod
+
+resources:
+  - ../../base
+  - namespace.yaml
+  - configmap.yaml
+
+# Environment-specific labels
+commonLabels:
+  environment: aws-prod
+  cluster: k3s
+  region: eu-west-1
+
+# Strategic merge patches
+patches:
+  - path: patches/deployment.yaml
+    target:
+      kind: Deployment
+      name: ticket-triage
+
+# Image from GHCR with immutable commit tag
+# ✅ DEPLOYED: AWS Bedrock feature image (feat/aws-bedrock-migration branch)
+#
+# Published via GitHub Actions workflow: aws-build-scan-push.yml
+# Workflow run: 38283289592
+# Trivy scan: PASSED (no CRITICAL/HIGH vulnerabilities)
+# Tests: 761 passed (including Bedrock client tests)
+# Commit: bbe590a3b19b569785251cbfd005d8ea86ecf084
+# Phase 6 validation: 6/6 synthetic tickets successful
+#
+# PROD uses same tested image as DEV. Update independently for canary/blue-green.
+# Deployment date: 2026-10-12 (Phase 7)
+images:
+  - name: ticket-triage-api
+    newName: ghcr.io/automation-agent-ai/multilingual-ticket-triage-devops
+    newTag: aws-sha-bbe590a3b19b569785251cbfd005d8ea86ecf084
