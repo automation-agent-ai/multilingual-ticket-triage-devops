@@ -1,56 +1,51 @@
 # ──────────────────────────────────────────────────────────────────────────────
-# Deploy — DEV
+# Deploy — DEV  [RETIRED — Sprint G12.1, 2026-10-26]
 #
-# Deploys a GHCR image to the triage-dev Kubernetes namespace.
+# ⚠️  THIS WORKFLOW IS RETIRED AND WILL NOT EXECUTE DEPLOYMENTS.
 #
-# Triggers:
-#   • workflow_dispatch — explicit manual trigger (preferred; operator chooses tag)
-#   • workflow_run      — automatic after CI completes successfully on main
-#                         (runs only on the self-hosted runner; no fork exposure)
+# The WSL/kind infrastructure this workflow targeted has been superseded by the
+# AWS k3s cluster.  The active DEV deployment path is aws-ci-cd.yml.
 #
-# Runner:
-#   Requires a self-hosted runner labeled  triage-dev-deployer  co-located with
-#   the kind cluster.  GitHub-hosted runners (ubuntu-latest) cannot reach the
-#   local cluster at 127.0.0.1.
+# Retirement changes (Sprint G12.1):
+#   • workflow_run trigger REMOVED — prevents queue accumulation against the
+#     offline self-hosted runner (liora-dev-deployer-wsl2, label: triage-dev-deployer).
+#   • workflow_dispatch retained as a HISTORICAL REFERENCE ONLY.
+#     Any manual trigger will queue indefinitely — the runner is offline.
+#     The job-level `if: false` guard ensures even a queued run never executes.
 #
-#   Setup:
-#     1. kubectl apply -k k8s/runner/          # create RBAC identity
-#     2. bash scripts/generate-runner-kubeconfig.sh  # produce KUBECONFIG_DEV
-#     3. Upload KUBECONFIG_DEV to GitHub: Settings → Environments → dev → Secrets
-#     4. APPROVED=yes GH_RUNNER_TOKEN=<token> bash scripts/install-runner.sh
-#     5. Re-run this workflow.
+# Infrastructure that was required (no longer provisioned):
+#   • Self-hosted runner: liora-dev-deployer-wsl2 (label: triage-dev-deployer)
+#   • Kind cluster at 127.0.0.1 accessible from the runner
+#   • KUBECONFIG_DEV GitHub Environment secret (scoped to triage-dev namespace)
+#   • GitHub Environment: dev
 #
-# Security model:
-#   • Only the manual trigger (workflow_dispatch) and trusted-main automatic
-#     trigger (workflow_run after CI on main) are accepted.
-#   • PRs and fork pushes NEVER reach this workflow.
-#   • KUBECONFIG_DEV grants the cicd-deployer ServiceAccount access to the
-#     triage-dev namespace only (Role: cicd-deployer-role).  The token has
-#     no cluster-admin or cross-namespace access.
-#   • The kubeconfig is written to a tmpfs path, used, then explicitly deleted.
-#   • On rollout failure the workflow runs `kubectl rollout undo` before exit.
-#   • GitHub Environment "dev" — add required-reviewers in
-#     Settings → Environments → dev for an additional approval gate.
+# DO NOT re-enable this workflow or register a new runner for it.
+# Active DEV deployment: .github/workflows/aws-ci-cd.yml → job deploy-dev
+# Active PROD promotion: .github/workflows/aws-prod-promote.yml
 #
-# Image naming (from ci.yml):
-#   ghcr.io/automation-agent-ai/multilingual-ticket-triage-devops:sha-<40-char-sha>
+# Historical deployment evidence is preserved; see GitHub Actions run history.
 # ──────────────────────────────────────────────────────────────────────────────
 
-name: Deploy — DEV
+name: Deploy — DEV [RETIRED]
 
 on:
-  # Automatic: run after CI completes successfully on main.
-  workflow_run:
-    workflows: ["CI — Test · Build · Scan · Publish"]
-    types: [completed]
-    branches: [main]
+  # NOTE: workflow_run trigger intentionally removed (Sprint G12.1).
+  # Removing it stops this workflow from queuing after every CI run on main
+  # against the offline runner liora-dev-deployer-wsl2.
+  #
+  # Original trigger (preserved for documentation):
+  #   workflow_run:
+  #     workflows: ["CI — Test · Build · Scan · Publish"]
+  #     types: [completed]
+  #     branches: [main]
 
-  # Manual: trigger with an explicit GHCR tag for re-deploys or rollbacks.
+  # Historical reference only — any trigger queues forever (runner offline).
   workflow_dispatch:
     inputs:
       image_tag:
         description: >
-          GHCR image tag to deploy.
+          [RETIRED] GHCR image tag — this workflow no longer deploys.
+          Use aws-ci-cd.yml for AWS DEV deployments.
           Format: sha-<40-hex-chars>  (immutable, preferred)
           or: latest  (mutable, use with caution)
         required: true
@@ -61,18 +56,17 @@ permissions:
 
 jobs:
   deploy-dev:
-    name: Deploy to triage-dev
+    name: Deploy to triage-dev [RETIRED — will not run]
     # ── Self-hosted runner requirement ─────────────────────────────────────
-    # Label 'triage-dev-deployer' is assigned during runner registration.
-    # If no self-hosted runner is registered, the job is queued but will not
-    # run (it does NOT fall back to a GitHub-hosted runner).
+    # Runner liora-dev-deployer-wsl2 (label: triage-dev-deployer) is OFFLINE.
+    # This job targets the WSL/kind cluster — no longer the active deployment path.
     runs-on: [self-hosted, linux, triage-dev-deployer]
 
-    # Only proceed when triggered by a successful CI run.
-    # workflow_dispatch bypasses this condition (explicit operator intent).
-    if: >-
-      github.event_name == 'workflow_dispatch'
-      || github.event.workflow_run.conclusion == 'success'
+    # ── RETIREMENT GUARD ──────────────────────────────────────────────────
+    # if: false prevents execution regardless of trigger.
+    # The workflow is retained as historical documentation only.
+    # Active DEV deployment: aws-ci-cd.yml → deploy-dev job (AWS k3s via SSM).
+    if: false
 
     # GitHub Environment "dev" — add required-reviewers for an extra gate.
     environment: dev

@@ -1,0 +1,8 @@
+# actionlint configuration
+# https://github.com/rhysd/actionlint/blob/main/docs/config.md
+#
+# self-hosted runner labels used in this repository:
+#   triage-dev-deployer  — retired WSL/kind runner (deploy-dev.yml, if:false guard)
+self-hosted-runner:
+  labels:
+    - triage-dev-deployer

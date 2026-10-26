@@ -6,22 +6,38 @@
 #   Test → Build → Scan → Push → Deploy DEV → (Manual) Deploy PROD
 #
 # TRIGGERS:
-#   push → feat/aws-bedrock-migration   : Full CI + automatic DEV deployment
+#   push → main                          : Full CI + automatic DEV deployment
+#   push → feat/aws-bedrock-migration    : Legacy feature-branch path (retained
+#                                          for backward compatibility during
+#                                          transition; kept until branch is deleted)
 #   workflow_dispatch                    : Manual DEV or PROD deployment
+#
+# IMAGE TAGS:
+#   aws-sha-<40-char-git-sha>  — immutable; different from ci.yml's sha- prefix
+#   Uses GHA layer cache; if ci.yml ran first on the same commit the build is
+#   near-instant (cache populated by the parallel ci.yml run).
 #
 # ARCHITECTURE:
 #   Single integrated workflow with dependent jobs (no workflow_run complexity).
-#   Works immediately on feature branch without requiring merge to main.
+#   DEV deploys automatically on push to main.
+#   PROD deploys only via aws-prod-promote.yml (workflow_dispatch + approval).
+#
+# CONCURRENCY:
+#   One aws-cicd run per ref at a time; new pushes queue, they do NOT cancel
+#   the in-flight run (cancel-in-progress: false).
+#   A single commit to main triggers exactly one DEV deployment.
 #
 # SECURITY:
 #   • GitHub OIDC authentication (no static AWS credentials)
 #   • Least-privilege IAM role (SSM only, specific instance)
-#   • GitHub Environment protection (aws-prod requires approval)
-#   • Immutable image deployment (SHA256 digest)
-#   • Automatic rollback on failure
+#   • GitHub Environment aws-dev gates DEV deployments
+#   • aws-prod is NOT touched by this workflow on push — promotion is
+#     a separate manual workflow (aws-prod-promote.yml)
+#   • Immutable image deployment (aws-sha- tag)
+#   • Automatic rollback on DEV failure
 #
-# ISOLATION FROM WSL PIPELINE:
-#   • Different workflow name
+# ISOLATION FROM RETIRED WSL PIPELINE:
+#   • deploy-dev.yml has been retired (Sprint G12.1); if: false guard added
 #   • Different image tags (aws-sha- vs sha-)
 #   • Different Kustomize overlays (k8s/overlays/aws-*)
 #   • GitHub-hosted runners only
@@ -31,8 +47,10 @@ name: AWS CI/CD Pipeline
 
 on:
   push:
-    branches: [feat/aws-bedrock-migration]
-  
+    branches:
+      - main                       # ← Primary: full CI + automatic DEV deploy
+      - feat/aws-bedrock-migration # ← Legacy: retained until branch is deleted
+
   workflow_dispatch:
     inputs:
       deploy_target:
@@ -58,7 +76,10 @@ permissions:
   contents: read
   id-token: write  # Required for AWS OIDC
 
-# Prevent concurrent deployments
+# Prevent concurrent deployments to the same ref.
+# cancel-in-progress: false — in-flight DEV deployments are never cancelled;
+# a new push queues and runs after the current one completes.
+# This ensures no two DEV deployments race on the same branch.
 concurrency:
   group: aws-cicd-${{ github.ref }}
   cancel-in-progress: false
@@ -266,13 +287,17 @@ jobs:
           DEPLOY_PROD="false"
           
           if [ "${{ github.event_name }}" = "push" ]; then
-            # Automatic: deploy to DEV only
+            # Automatic push (main or feat/aws-bedrock-migration):
+            # Deploy to DEV only. PROD is NEVER triggered automatically.
+            # PROD promotion must use aws-prod-promote.yml (workflow_dispatch).
             DEPLOY_DEV="true"
           elif [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             # Manual: deploy to selected target
             if [ "${{ github.event.inputs.deploy_target }}" = "dev" ]; then
               DEPLOY_DEV="true"
             elif [ "${{ github.event.inputs.deploy_target }}" = "prod" ]; then
+              # Note: PROD via this workflow is deprecated.
+              # Use aws-prod-promote.yml for PROD deployments.
               DEPLOY_PROD="true"
             fi
           fi
