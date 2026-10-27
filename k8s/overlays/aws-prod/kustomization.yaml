@@ -30,22 +30,22 @@ kind: Kustomization
 namespace: triage-prod
 
 resources:
-  - ../../base
-  - namespace.yaml
-  - configmap.yaml
+- ../../base
+- namespace.yaml
+- configmap.yaml
 
 # Environment-specific labels
 commonLabels:
-  environment: aws-prod
   cluster: k3s
+  environment: aws-prod
   region: eu-west-1
 
 # Strategic merge patches
 patches:
-  - path: patches/deployment.yaml
-    target:
-      kind: Deployment
-      name: ticket-triage
+- path: patches/deployment.yaml
+  target:
+    kind: Deployment
+    name: ticket-triage
 
 # Image from GHCR with immutable commit tag
 # ✅ DEPLOYED: AWS Bedrock feature image (feat/aws-bedrock-migration branch)
@@ -60,6 +60,6 @@ patches:
 # PROD uses same tested image as DEV. Update independently for canary/blue-green.
 # Deployment date: 2026-10-12 (Phase 7)
 images:
-  - name: ticket-triage-api
-    newName: ghcr.io/automation-agent-ai/multilingual-ticket-triage-devops
-    newTag: aws-sha-bbe590a3b19b569785251cbfd005d8ea86ecf084
+- name: ticket-triage-api
+  newName: ghcr.io/automation-agent-ai/multilingual-ticket-triage-devops
+  newTag: aws-sha-05aa1fcae4d38161a4f420462dc0ae8711579773

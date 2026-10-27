@@ -1,0 +1,107 @@
+Sprint G10 isolated restore test — 2026-10-26T17:50:10Z
+RESTORE_DIR=/tmp/liora-restic-restore-g10-1793037009
+DATA_DIR=/tmp/liora-restic-restore-g10-1793037009/tmp/liora-restic-staging-20261026T020122Z
+--- backup-manifest.json ---
+{
+  "backup_timestamp": "2026-10-26T02:01:25.244731+00:00",
+  "backup_version": "phase11c-restic",
+  "source_host": "ip-172-31-43-47",
+  "source_instance": "i-07bc3aaf0d692974d",
+  "consistency_validated": true,
+  "components": {
+    "duckdb": {
+      "path": "/home/ubuntu/workspaces/multilingual-ticket-triage-devops/data/tickets.duckdb",
+      "size_bytes": 26750976,
+      "size_mb": "25.51",
+      "modified_age_seconds": "1169887.5",
+      "has_wal": false,
+      "consistency_verified": "strict-readonly",
+      "tables": [
+        "historical_tickets",
+        "triage_confusion_matrix",
+        "triage_metrics",
+        "triage_predictions",
+        "triage_runs"
+      ],
+      "table_count": 5,
+      "historical_tickets": 4000,
+      "table_counts": {
+        "historical_tickets": 4000,
+        "triage_confusion_matrix": 1461,
+        "triage_metrics": 1533,
+        "triage_predictions": 4676,
+        "triage_runs": 59
+      },
+      "backup_path": "/tmp/liora-restic-staging-20261026T020122Z/tickets.duckdb",
+      "sha256": "f4d4dc42ef61c8a6267a76a68c2f386d6235261eba8788f3215bdb2ba9f50887"
+    },
+    "lancedb": {
+      "path": "/home/ubuntu/workspaces/multilingual-ticket-triage-devops/data/lancedb",
+      "lance_files": 5,
+      "total_size_bytes": 85057895,
+      "size_mb": "81.12",
+      "vector_count": 3206,
+      "schema_fields": 13,
+      "embedding_field": "vector",
+      "embedding_dimensions": 1024,
+      "dimensions_verified": true,
+      "backup_path": "/tmp/liora-restic-staging-20261026T020122Z/lancedb"
+    }
+  }
+}--- sha256 verify CHECKSUMS ---
+backup-manifest.json: OK
+lancedb/__manifest/_transactions/0-f60b5766-b1c5-439f-9885-6d17bcae3dc1.txn: OK
+lancedb/__manifest/_versions/18446744073709551614.manifest: OK
+lancedb/__manifest/_versions/latest_version_hint.json: OK
+lancedb/ticket_embeddings.lance/_transactions/0-f7e731b9-fc02-4ffb-83e6-9c2e7062c78c.txn: OK
+lancedb/ticket_embeddings.lance/_transactions/1-39de3af0-e7d4-4902-bb16-0ff3d4c516b7.txn: OK
+lancedb/ticket_embeddings.lance/_transactions/2-d5cddb83-c5c9-49a6-9957-b32979475e46.txn: OK
+lancedb/ticket_embeddings.lance/_transactions/3-715fc2dd-ba9f-4609-9dea-66d58125f050.txn: OK
+lancedb/ticket_embeddings.lance/_transactions/4-a184ba0a-b5b0-4d0e-b8ca-67ef8e9fde6b.txn: OK
+lancedb/ticket_embeddings.lance/_versions/1.manifest: OK
+lancedb/ticket_embeddings.lance/_versions/2.manifest: OK
+lancedb/ticket_embeddings.lance/_versions/3.manifest: OK
+lancedb/ticket_embeddings.lance/_versions/4.manifest: OK
+lancedb/ticket_embeddings.lance/_versions/5.manifest: OK
+lancedb/ticket_embeddings.lance/_versions/latest_version_hint.json: OK
+lancedb/ticket_embeddings.lance/data/010101001000001101000111e2bdc34e91bdc7e172a48a673c.lance: OK
+lancedb/ticket_embeddings.lance/data/1010111101011111101001115127854d75becdf925b53a38fc.lance: OK
+lancedb/ticket_embeddings.lance/data/11011011001101110110001149eb474e2e9933cf8c51b38240.lance: OK
+lancedb/ticket_embeddings.lance/data/508ba311-a002-49dd-866b-4efc9eefeebd.lance: OK
+lancedb/ticket_embeddings.lance/data/7805cf39-21c8-4a1e-9eab-270c4e62b748.lance: OK
+tickets.duckdb: OK
+--- duckdb quick check ---
+-rwxr-xr-x 1 ubuntu ubuntu 26750976 Oct 12 13:03 /tmp/liora-restic-restore-g10-1793037009/tmp/liora-restic-staging-20261026T020122Z/tickets.duckdb
+--- validate-databases.py ---
+[2026-10-26T17:50:10Z] [INFO] === Phase 11C Restore Validation Starting ===
+[2026-10-26T17:50:10Z] [INFO] Restore directory: /tmp/liora-restic-restore-g10-1793037009/tmp/liora-restic-staging-20261026T020122Z
+[2026-10-26T17:50:10Z] [INFO] Validating backup manifest...
+[2026-10-26T17:50:10Z] [INFO]   Backup timestamp: 2026-10-26T02:01:25.244731+00:00
+[2026-10-26T17:50:10Z] [INFO]   Backup version: phase11c-restic
+[2026-10-26T17:50:10Z] [INFO]   Consistency validated: True
+[2026-10-26T17:50:10Z] [INFO] Verifying SHA-256 checksums...
+[2026-10-26T17:50:10Z] [INFO]   Checking 21 files...
+[2026-10-26T17:50:10Z] [INFO]   ✓ All checksums valid
+[2026-10-26T17:50:10Z] [INFO] Validating DuckDB...
+[2026-10-26T17:50:10Z] [INFO]   Tables: 5
+[2026-10-26T17:50:10Z] [INFO]   Historical tickets: 4000
+[2026-10-26T17:50:10Z] [INFO]     historical_tickets: 4000 rows
+[2026-10-26T17:50:10Z] [INFO]     triage_confusion_matrix: 1461 rows
+[2026-10-26T17:50:10Z] [INFO]     triage_metrics: 1533 rows
+[2026-10-26T17:50:10Z] [INFO]     triage_predictions: 4676 rows
+[2026-10-26T17:50:10Z] [INFO]     triage_runs: 59 rows
+[2026-10-26T17:50:10Z] [INFO]   ✓ DuckDB validation passed
+[2026-10-26T17:50:10Z] [INFO] Validating LanceDB (STRICT mode)...
+[2026-10-26T17:50:13Z] [INFO]   Vectors: 3206
+[2026-10-26T17:50:13Z] [INFO]   ✓ Vector count verified: 3206
+[2026-10-26T17:50:13Z] [INFO]   Schema fields: 13
+[2026-10-26T17:50:13Z] [INFO]   ✓ Vector field: vector
+[2026-10-26T17:50:13Z] [INFO]   Vector dimensions: 1024
+[2026-10-26T17:50:13Z] [INFO]   ✓ Dimensions verified: 1024
+[2026-10-26T17:50:13Z] [INFO]   ✓ STRICT LanceDB validation passed
+[2026-10-26T17:50:13Z] [INFO] === Restore Validation Complete ===
+[2026-10-26T17:50:13Z] [INFO] ✓ All validations passed
+[2026-10-26T17:50:13Z] [INFO] ✓ Checksums verified
+[2026-10-26T17:50:13Z] [INFO] ✓ DuckDB validated
+[2026-10-26T17:50:13Z] [INFO] ✓ LanceDB validated
+[2026-10-26T17:50:13Z] [INFO] ✓ Restore is consistent and complete
